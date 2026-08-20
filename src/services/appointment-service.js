@@ -4,7 +4,7 @@
 const crypto = require("node:crypto");
 const clinicSvc = require("./clinic-service");
 const doctorSvc = require("./doctor-service");
-const { epochToISO, toDateString } = require("./availability-service");
+const { epochToISO, formatHumanTime, toDateString } = require("./availability-service");
 const commsWorkflowSvc = require("./comms-workflow-service");
 const { config } = require("../config");
 
@@ -169,7 +169,19 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
       clinicId,
       patientId: patientId ?? null,
       doctorId,
-      timeslot: start,
+      // A genuine UTC instant, not the raw client string — `timeslot` is a
+      // legacy `timestamp without time zone` column (see lib/dates.js), and
+      // Postgres silently DISCARDS an offset like "+05:30" on write to such
+      // a column, keeping only the local wall-clock digits. The read-side
+      // normalizer (toUtcIso) then stamps "Z" onto those digits assuming
+      // they're already UTC — correct for the dashboard's own UTC-`Z`
+      // bookings, but silently wrong for any offset-bearing caller (the
+      // public booking API's slots are `epochToISO()`-formatted with a real
+      // offset) — a real live bug, confirmed against a corrupted appointment
+      // (stored local 14:45 IST re-read as if it meant UTC 14:45, displaying
+      // as 20:15 IST). Converting through startMs here makes the digits
+      // genuinely UTC regardless of what format the caller sent.
+      timeslot: new Date(startMs).toISOString(),
       symptoms: reason ?? null,
       notes: notes ?? null,
       bookerRelation,
@@ -210,8 +222,12 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
           clinicPhone: clinic.phone,
           doctorName: doctor.fullName,
           patientName: patient.name,
-          apptTime: epochToISO(startMs, timezone),
+          apptTime: formatHumanTime(startMs, timezone),
           bookingUrl: bookingUrlFor(clinicId, appointmentId),
+          // Suffix-only form of bookingUrl, for Content Template URL buttons —
+          // Meta/Twilio only allow a variable at the end of an already-fixed
+          // base URL on a button component, never the whole URL as one variable.
+          bookingUrlPath: `${clinicId}/${appointmentId}`,
         },
       },
       log,
@@ -363,7 +379,9 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
   const { data: updated, error: updateErr } = await supabaseClient
     .from("Appointment")
     .update({
-      timeslot: newStart,
+      // See bookAppointment's identical fix above — always a genuine UTC
+      // instant, never the raw (possibly offset-bearing) client string.
+      timeslot: new Date(newStartMs).toISOString(),
       // Keep status as the pre-reschedule booking state (booked/blocked), not
       // a literal "rescheduled" — that's an event, already captured by
       // rescheduledAt/oldStart/auditHistory below, not a status. The frontend
@@ -412,9 +430,10 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
             clinicPhone: clinic.phone,
             doctorName: doctor.fullName,
             patientName: patient.fullName,
-            oldApptTime: appt.timeslot ? epochToISO(new Date(appt.timeslot).getTime(), timezone) : null,
-            apptTime: epochToISO(newStartMs, timezone),
+            oldApptTime: appt.timeslot ? formatHumanTime(new Date(appt.timeslot).getTime(), timezone) : null,
+            apptTime: formatHumanTime(newStartMs, timezone),
             bookingUrl: bookingUrlFor(clinicId, appointmentId),
+            bookingUrlPath: `${clinicId}/${appointmentId}`,
           },
         },
         log,
@@ -557,7 +576,7 @@ async function cancelAppointment(nettuClient, supabaseClient, opts, log, twilioC
             clinicPhone: clinic.phone,
             doctorName: doctor?.fullName,
             patientName: patient.fullName,
-            apptTime: appt.timeslot ? epochToISO(new Date(appt.timeslot).getTime(), clinicRules.timezone) : null,
+            apptTime: appt.timeslot ? formatHumanTime(new Date(appt.timeslot).getTime(), clinicRules.timezone) : null,
             reason: reason ?? null,
           },
         },

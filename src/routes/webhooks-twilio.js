@@ -33,6 +33,7 @@ const tableSvc = require("../services/table-service");
 const whatsappAgentSvc = require("../services/whatsapp-agent-service");
 const openaiSvc = require("../services/openai-service");
 const crypto = require("node:crypto");
+const { config } = require("../config");
 
 const GREETING_BUCKET = "clinic-voice";
 
@@ -303,6 +304,15 @@ async function triggerMissedCallFollowup(supabaseClient, twilioClient, clinicId,
   if (!workflow || !channelsEnabled.includes(workflow.channel)) return;
 
   const from = workflow.channel === "whatsapp" ? clinic?.whatsappFrom : null;
+  // Unlike booking_confirmed/reschedule's {{bookingUrl}} (an existing
+  // appointment's manage link), there's no appointment yet here — this
+  // points at the pre-booking entry point instead (the same
+  // /{clinicId}/{phone} route schedurx-form-agent's IntakeForm already
+  // handles), pre-filling the caller's own number.
+  const bookingUrl = config.APP_BASE_URL ? `${config.APP_BASE_URL}/${clinicId}/${encodeURIComponent(callerPhone)}` : undefined;
+  // Suffix-only form for Content Template URL buttons — see bookingUrlPath in
+  // appointment-service.js for why the button variant can't just reuse bookingUrl.
+  const bookingUrlPath = `${clinicId}/${encodeURIComponent(callerPhone)}`;
   try {
     await messagingSvc.sendTemplatedMessage(
       {
@@ -311,7 +321,7 @@ async function triggerMissedCallFollowup(supabaseClient, twilioClient, clinicId,
         toPhone: callerPhone,
         from,
         template: workflow.template,
-        data: { clinicName: clinic?.name, clinicPhone: clinic?.phone },
+        data: { clinicName: clinic?.name, clinicPhone: clinic?.phone, bookingUrl, bookingUrlPath },
       },
       log,
     );

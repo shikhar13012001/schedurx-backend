@@ -54,6 +54,21 @@ function localToUtcISO(dateStr, timeStr, timezone) {
   return new Date(approxUtcMs - offsetMs).toISOString();
 }
 
+// Human-readable "for a WhatsApp/SMS message" rendering, e.g. "2:45 PM, Mon 24 Aug" —
+// distinct from epochToISO (machine-readable, used for computing/comparing
+// instants) and from toUtcIso in lib/dates.js (a storage-layer marker fix,
+// unrelated to display). Every {{apptTime}}/{{oldApptTime}} template
+// placeholder should go through this, not a raw ISO string — confirmed live
+// as a real bug otherwise (patients seeing "2026-08-24T14:45:00+05:30"
+// verbatim in a WhatsApp message).
+function formatHumanTime(epochMsOrDate, timezone) {
+  const date = epochMsOrDate instanceof Date ? epochMsOrDate : new Date(epochMsOrDate);
+  if (isNaN(date.getTime())) return null;
+  const time = date.toLocaleTimeString("en-IN", { timeZone: timezone, hour: "numeric", minute: "2-digit", hour12: true });
+  const day = date.toLocaleDateString("en-IN", { timeZone: timezone, weekday: "short", day: "numeric", month: "short" });
+  return `${time}, ${day}`;
+}
+
 // Parse an ISO date string or Date-like value to a plain YYYY-MM-DD string.
 function toDateString(value) {
   if (!value) return null;
@@ -182,4 +197,4 @@ async function getAvailableSlots(nettuClient, supabaseClient, opts, log) {
   return { slots, timezone, startDate, endDate };
 }
 
-module.exports = { getAvailableSlots, epochToISO, toDateString, localToUtcISO };
+module.exports = { getAvailableSlots, epochToISO, formatHumanTime, toDateString, localToUtcISO };

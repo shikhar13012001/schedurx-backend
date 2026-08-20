@@ -40,6 +40,7 @@
 const { makeId } = require("../lib/ids");
 const clinicSvc = require("./clinic-service");
 const messagingSvc = require("./messaging-service");
+const { formatHumanTime } = require("./availability-service");
 
 const IMMEDIATE_TRIGGERS = new Set(["booking_confirmed", "reschedule", "cancellation"]);
 const DELAYED_TRIGGERS = new Set(["reminder", "pre_appointment", "post_appointment", "review_request"]);
@@ -195,12 +196,13 @@ async function sendDelayedWorkflowMessage({ supabaseClient, twilioClient, clinic
   ]);
   if (!patient?.contactNumber) return;
 
+  const timezone = clinicSvc.getSchedulingRules(clinic ?? {}).timezone;
   const data = {
     clinicName: clinic?.name,
     clinicPhone: clinic?.phone,
     doctorName: doctor?.fullName,
     patientName: patient.fullName,
-    apptTime: appointment.timeslot,
+    apptTime: appointment.timeslot ? formatHumanTime(new Date(appointment.timeslot).getTime(), timezone) : null,
     symptoms: appointment.symptoms,
     clinicWhatsappFrom: clinic?.whatsappFrom,
   };
