@@ -1,0 +1,323 @@
+// Handles the "patient calls a clinic/doctor number, it goes unanswered, the
+// carrier forwards it to our shared Twilio number" flow described in the
+// Core Flow spec. Distinct from — and doesn't touch — the existing Ultravox
+// voice-agent path (/tools/*, /internal/call-context): that's a live,
+// separate, opaque system this backend has no visibility into. This is a
+// fresh, config-driven path for the specific "call went unanswered" case.
+//
+// POST /voice        — inbound forwarded call, returns TwiML.
+// POST /voice-status — call status callback (used to fire the missed-call
+//                      follow-up once the call actually ends).
+// POST /message-status — SMS/WhatsApp delivery callbacks (slice 2: wires
+//                        into Reminder.status once comms-workflow-service
+//                        lands; accepted and logged today so Twilio doesn't
+//                        see 404s if the number's already configured for it).
+// POST /whatsapp-inbound — a patient texting the clinic's WhatsApp number.
+//                        Always routes into the existing staff Thread/ChatMsg
+//                        consult inbox (same model sendReply() already uses)
+//                        so a human sees the exchange either way. When
+//                        assistantModel is configured, also runs the WhatsApp
+//                        patient agent (whatsapp-agent-service.js — same tool-
+//                        calling pattern as the staff "Ask ScheduRx" assistant,
+//                        scoped to the phone-verified caller's own data) and
+//                        replies with its answer; otherwise falls back to the
+//                        original empty-TwiML-ack behavior.
+
+const { Router } = require("express");
+const { renderTemplate } = require("../lib/template");
+const clinicSvc = require("../services/clinic-service");
+const phoneRouteSvc = require("../services/phone-route-service");
+const callLogSvc = require("../services/call-log-service");
+const messagingSvc = require("../services/messaging-service");
+const tableSvc = require("../services/table-service");
+const whatsappAgentSvc = require("../services/whatsapp-agent-service");
+const openaiSvc = require("../services/openai-service");
+const crypto = require("node:crypto");
+
+const GREETING_BUCKET = "clinic-voice";
+
+function greetingHash(text) {
+  return crypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+// Best-effort — synthesizes and caches a natural-sounding greeting for NEXT
+// time; never blocks or delays the current call (which already got the fast
+// <Say> fallback before this is called, unawaited, from the handler below).
+// Uploads to the public clinic-voice bucket (scripts/setup-voice-bucket.js)
+// and stamps the clinic's settings so the next /voice call for this clinic
+// can <Play> the cached audio instead of falling back to <Say> again.
+async function cacheGreetingAudio(supabaseClient, elevenLabsClient, clinic, greeting, hash, log) {
+  if (!elevenLabsClient) return;
+  try {
+    const audio = await elevenLabsClient.synthesizeSpeech({ text: greeting });
+    const path = `${clinic.id}/greeting.mp3`;
+    const { error: uploadErr } = await supabaseClient.storage
+      .from(GREETING_BUCKET)
+      .upload(path, audio, { contentType: "audio/mpeg", upsert: true });
+    if (uploadErr) throw uploadErr;
+
+    const {
+      data: { publicUrl },
+    } = supabaseClient.storage.from(GREETING_BUCKET).getPublicUrl(path);
+
+    const settings = clinic.settings ?? {};
+    const communication = settings.communication ?? {};
+    const { error: updateErr } = await supabaseClient
+      .from("Clinic")
+      .update({
+        settings: { ...settings, communication: { ...communication, voiceGreetingAudio: { path, hash, url: publicUrl } } },
+        updatedAt: new Date().toISOString(),
+      })
+      .eq("id", clinic.id);
+    if (updateErr) throw updateErr;
+
+    log?.info({ clinicId: clinic.id }, "[webhooks:twilio] greeting audio cached for next call");
+  } catch (err) {
+    log?.warn({ err, clinicId: clinic.id }, "[webhooks:twilio] greeting synthesis/cache failed");
+  }
+}
+
+const DEFAULT_GREETING =
+  "Thanks for calling. We're unable to take your call right now — we'll text you shortly to help you book an appointment.";
+const DEFAULT_FALLBACK = "Sorry, we couldn't connect your call. Please try again in a moment.";
+
+function verifyTwilioSignature(twilioClient) {
+  return (req, res, next) => {
+    const signature = req.headers["x-twilio-signature"];
+    const url = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+    if (!twilioClient.validateSignature(signature, url, req.body)) {
+      req.log?.warn({ url }, "[webhooks:twilio] signature verification failed");
+      return res.status(401).send("Unauthorized");
+    }
+    next();
+  };
+}
+
+// Best-effort — a triage-classification failure must never break the rest of
+// the inbound handler. Written conditionally (retry without the new columns
+// on a schema-cache miss) so this works before the Thread.triage/aiSummary
+// migration has been applied, same defensive pattern as
+// messaging-service.js's recordOutboundAiMessage.
+async function classifyAndStoreTriage(supabaseClient, openaiClient, threadId, body, log) {
+  if (!openaiClient || !body) return;
+  try {
+    const { triage, summary } = await openaiSvc.classifyTriage(openaiClient, body);
+    const { error } = await supabaseClient.from("Thread").update({ triage, aiSummary: summary }).eq("id", threadId);
+    if (error && /column/i.test(error.message ?? "")) {
+      await supabaseClient.from("Thread").update({ triage }).eq("id", threadId);
+    }
+  } catch (err) {
+    log?.warn({ err, threadId }, "[webhooks:twilio] triage classification failed");
+  }
+}
+
+function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, assistantModel, openaiClient, elevenLabsClient }) {
+  const router = Router();
+  const verify = verifyTwilioSignature(twilioClient);
+
+  router.post("/voice", verify, async (req, res) => {
+    const VoiceResponse = twilioClient.VoiceResponse;
+    try {
+      const originalNumber = phoneRouteSvc.resolveOriginalDestination(req);
+      const route = await phoneRouteSvc.resolveRoute(supabaseClient, originalNumber);
+
+      if (!route) {
+        req.log?.warn(
+          { originalNumber, callSid: req.body?.CallSid },
+          "[webhooks:twilio] voice — could not resolve clinic, using fallback",
+        );
+        const twiml = new VoiceResponse();
+        twiml.say(DEFAULT_FALLBACK);
+        return res.type("text/xml").send(twiml.toString());
+      }
+
+      const clinic = await clinicSvc.getClinic(supabaseClient, route.clinicId);
+      const comms = clinic?.settings?.communication ?? {};
+      const greeting = renderTemplate(comms.voiceGreetingTemplate || DEFAULT_GREETING, {
+        clinicName: clinic?.name,
+        clinicPhone: clinic?.phone,
+      });
+      const hash = greetingHash(greeting);
+
+      const twiml = new VoiceResponse();
+      const cachedAudio = comms.voiceGreetingAudio;
+      if (cachedAudio?.hash === hash && cachedAudio?.url) {
+        twiml.play(cachedAudio.url);
+      } else {
+        twiml.say(greeting);
+        // Not awaited — this call already got its (fast) <Say> greeting above;
+        // synthesis/upload runs in the background so it never adds latency to
+        // the call in progress, and the NEXT call for this clinic gets <Play>.
+        cacheGreetingAudio(supabaseClient, elevenLabsClient, clinic, greeting, hash, req.log);
+      }
+
+      await callLogSvc.upsertByTwilioCallSid(supabaseClient, {
+        clinicId: route.clinicId,
+        twilioCallSid: req.body.CallSid,
+        phone: req.body.From ?? "unknown",
+        durationSec: 0,
+        outcome: "info",
+      });
+
+      res.type("text/xml").send(twiml.toString());
+    } catch (err) {
+      req.log?.error({ err }, "[webhooks:twilio] voice handler failed");
+      const twiml = new VoiceResponse();
+      twiml.say(DEFAULT_FALLBACK);
+      res.type("text/xml").send(twiml.toString());
+    }
+  });
+
+  router.post("/voice-status", verify, async (req, res) => {
+    try {
+      const callSid = req.body?.CallSid;
+      const callStatus = req.body?.CallStatus;
+      if (!callSid) return res.sendStatus(200);
+
+      const { data: callLog } = await supabaseClient
+        .from("CallLog")
+        .select("*")
+        .eq("twilioCallSid", callSid)
+        .maybeSingle();
+      const clinicId =
+        callLog?.clinicId ??
+        (await phoneRouteSvc.resolveRoute(supabaseClient, phoneRouteSvc.resolveOriginalDestination(req)))?.clinicId;
+      if (!clinicId) return res.sendStatus(200);
+
+      if (callLog) {
+        await callLogSvc.upsertByTwilioCallSid(supabaseClient, {
+          clinicId,
+          twilioCallSid: callSid,
+          phone: callLog.phone,
+          durationSec: Number(req.body?.CallDuration ?? 0) || 0,
+          outcome: callLog.outcome,
+        });
+      }
+
+      // Only the terminal "the automated greeting played and the caller hung
+      // up" status should trigger a follow-up — not every intermediate
+      // ringing/in-progress callback Twilio sends for the same call.
+      if (callStatus === "completed") {
+        await triggerMissedCallFollowup(supabaseClient, twilioClient, clinicId, req.body?.From, req.log);
+      }
+
+      res.sendStatus(200);
+    } catch (err) {
+      req.log?.error({ err }, "[webhooks:twilio] voice-status handler failed");
+      res.sendStatus(200); // never make Twilio retry over our own follow-up failure
+    }
+  });
+
+  router.post("/message-status", verify, async (req, res) => {
+    req.log?.info(
+      { sid: req.body?.MessageSid, status: req.body?.MessageStatus },
+      "[webhooks:twilio] message-status received",
+    );
+    res.sendStatus(200);
+  });
+
+  router.post("/whatsapp-inbound", verify, async (req, res) => {
+    const MessagingResponse = twilioClient.MessagingResponse;
+    const emptyReply = () => res.type("text/xml").send(new MessagingResponse().toString());
+
+    try {
+      const from = (req.body?.From ?? "").replace(/^whatsapp:/, "");
+      const to = (req.body?.To ?? "").replace(/^whatsapp:/, "");
+      const body = req.body?.Body ?? "";
+      const messageSid = req.body?.MessageSid;
+
+      if (!from || !to) return emptyReply();
+
+      // Twilio retries a webhook that's slow to respond — an LLM round trip
+      // (below) is slow enough to make that a real possibility here, unlike
+      // before. A retry must not re-run a reschedule/cancel tool call a
+      // second time, so bail out early if this MessageSid was already logged.
+      if (messageSid) {
+        const { data: existing } = await supabaseClient
+          .from("ChatMsg")
+          .select("id")
+          .eq("waMessageId", messageSid)
+          .maybeSingle();
+        if (existing) return emptyReply();
+      }
+
+      // Resolves the receiving WhatsApp number to a clinic exactly like
+      // /voice resolves the receiving phone number — a shared Twilio
+      // account can send/receive on behalf of more than one clinic's
+      // WhatsApp sender, so this can't assume a single fixed clinic.
+      const { data: clinic } = await supabaseClient.from("Clinic").select("*").eq("whatsappFrom", to).maybeSingle();
+      if (!clinic) {
+        req.log?.warn({ to }, "[webhooks:twilio] whatsapp-inbound — no clinic owns this WhatsApp number");
+        return emptyReply();
+      }
+
+      const patient = await tableSvc.findOrCreatePatient(supabaseClient, clinic.id, { phone: from });
+      const thread = await messagingSvc.findOrCreateThread(supabaseClient, {
+        clinicId: clinic.id,
+        patientId: patient.id,
+        contactPhone: from,
+      });
+      await messagingSvc.recordInboundMessage(supabaseClient, {
+        clinicId: clinic.id,
+        thread,
+        body,
+        waMessageId: messageSid,
+      });
+      await classifyAndStoreTriage(supabaseClient, openaiClient, thread.id, body, req.log);
+
+      if (!assistantModel) return emptyReply();
+
+      const replyText = await whatsappAgentSvc.respondToPatientMessage(
+        { supabaseClient, nettuClient, twilioClient, assistantModel, clinic, patient, thread },
+        req.log,
+      );
+      if (!replyText) return emptyReply();
+
+      await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
+      const twiml = new MessagingResponse();
+      twiml.message(replyText);
+      return res.type("text/xml").send(twiml.toString());
+    } catch (err) {
+      req.log?.error({ err }, "[webhooks:twilio] whatsapp-inbound failed");
+      return emptyReply();
+    }
+  });
+
+  return router;
+}
+
+// Zero-delay only (slice 1 scope) — sends synchronously once the call is
+// confirmed ended. A clinic that wants a delayed follow-up instead configures
+// a workflow with a non-zero offset, handled once comms-workflow-service
+// (slice 2) lands and rides the same lightweight nettu carrier-event pattern
+// built for task reminders.
+async function triggerMissedCallFollowup(supabaseClient, twilioClient, clinicId, callerPhone, log) {
+  if (!callerPhone) return;
+
+  const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
+  const comms = clinic?.settings?.communication ?? {};
+  const channelsEnabled = comms.channelsEnabled ?? [];
+  const workflow = (comms.workflows ?? []).find(
+    (w) => w.enabled && w.trigger === "missed_call_followup" && (!w.offsetMinutes || w.offsetMinutes === 0),
+  );
+  if (!workflow || !channelsEnabled.includes(workflow.channel)) return;
+
+  const from = workflow.channel === "whatsapp" ? clinic?.whatsappFrom : null;
+  try {
+    await messagingSvc.sendTemplatedMessage(
+      {
+        twilioClient,
+        channel: workflow.channel,
+        toPhone: callerPhone,
+        from,
+        template: workflow.template,
+        data: { clinicName: clinic?.name, clinicPhone: clinic?.phone },
+      },
+      log,
+    );
+  } catch (err) {
+    log?.error({ err, clinicId, workflowId: workflow.id }, "[webhooks:twilio] missed-call follow-up send failed");
+  }
+}
+
+module.exports = { createTwilioWebhookRouter };

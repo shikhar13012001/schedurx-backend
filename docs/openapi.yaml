@@ -1,0 +1,2335 @@
+openapi: 3.1.0
+info:
+  title: Schedurx Backend API
+  version: 1.0.0
+  description: >
+    Clinic business API — patients, doctors, appointments, and calendar tools.
+    The /tools/* paths are called directly by the Ultravox voice agent during a
+    live call; /internal/* is called only by schedurx-ultravox-demo-api.
+servers:
+  - url: https://backend.example.test
+    description: Replace with this service's public URL for deployed environments.
+components:
+  securitySchemes:
+    ToolsBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: TOOLS_API_KEY — configured into Ultravox's tool definitions by the demo bridge.
+    InternalBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: INTERNAL_API_KEY — held only by schedurx-ultravox-demo-api.
+    FirebaseBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        A Firebase ID token for a Staff account. Custom claims (role, clinicId,
+        doctorId) are set at onboarding time via POST /internal/staff and read
+        by every /api/v1/* route — clinicId is always sourced from these claims,
+        never from the request itself.
+    NettuWebhookKeyAuth:
+      type: apiKey
+      in: header
+      name: nettu-scheduler-webhook-key
+      description: >
+        Static key set once via `PUT /api/v1/account/webhook` on the nettu
+        account (see scripts/setup-nettu-webhook.js) — nettu echoes this exact
+        value back on every reminder callback. Not a bearer token.
+    TwilioSignatureAuth:
+      type: apiKey
+      in: header
+      name: X-Twilio-Signature
+      description: >
+        HMAC-SHA1 signature over the exact request URL + form params, verified
+        against TWILIO_AUTH_TOKEN (see twilio-client.js's validateSignature).
+        Twilio computes and sends this automatically; it isn't a credential a
+        caller sets manually.
+  schemas:
+    SimpleError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    StructuredToolError:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          const: false
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type:
+                - object
+                - "null"
+              additionalProperties: true
+    Patient:
+      type: object
+      required: [patientId, fullName, contactNumber, age, gender, clinicId, isNew]
+      properties:
+        patientId:
+          type: string
+        fullName:
+          type:
+            - string
+            - "null"
+        contactNumber:
+          type: string
+        age:
+          type:
+            - integer
+            - "null"
+        gender:
+          type:
+            - string
+            - "null"
+        clinicId:
+          type: string
+        isNew:
+          type: boolean
+    Doctor:
+      type: object
+      required: [doctorId, fullName, specialty, qualification, languages, feeInr]
+      properties:
+        doctorId:
+          type: string
+        fullName:
+          type: string
+        specialty:
+          type:
+            - string
+            - "null"
+        qualification:
+          type:
+            - string
+            - "null"
+        languages:
+          type:
+            - array
+            - string
+            - "null"
+          items:
+            type: string
+        feeInr:
+          type:
+            - number
+            - integer
+            - "null"
+    Appointment:
+      type: object
+      required: [appointmentId, patientId, clinicId, doctorId, symptoms, timeslot, status]
+      properties:
+        appointmentId:
+          type: string
+        patientId:
+          type: string
+        clinicId:
+          type: string
+        doctorId:
+          type: string
+        symptoms:
+          type:
+            - string
+            - "null"
+        timeslot:
+          type:
+            - string
+            - "null"
+        status:
+          type: string
+    CalendarSuccess:
+      type: object
+      required: [success, data, message]
+      properties:
+        success:
+          const: true
+        data:
+          type: object
+          additionalProperties: true
+        message:
+          type:
+            - string
+            - "null"
+    ApiV1Success:
+      type: object
+      required: [success, data, message]
+      properties:
+        success:
+          const: true
+        data:
+          type: object
+          additionalProperties: true
+        message:
+          type:
+            - string
+            - "null"
+    ApiV1Error:
+      allOf:
+        - $ref: "#/components/schemas/StructuredToolError"
+    Staff:
+      type: object
+      required: [uid, role, clinicId]
+      properties:
+        uid:
+          type: string
+        email:
+          type: [string, "null"]
+        role:
+          type: string
+          enum: [doctor, receptionist, owner]
+        clinicId:
+          type: string
+        doctorId:
+          type: [string, "null"]
+    QueueItem:
+      type: object
+      properties:
+        id:
+          type: string
+        clinicId:
+          type: string
+        doctorId:
+          type: [string, "null"]
+        patientId:
+          type: [string, "null"]
+        appointmentId:
+          type: [string, "null"]
+        displayName:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [waiting, in_room, done, skipped]
+        position:
+          type: integer
+        walkIn:
+          type: boolean
+    Visit:
+      type: object
+      properties:
+        id:
+          type: string
+        clinicId:
+          type: string
+        patientId:
+          type: string
+        doctorId:
+          type: [string, "null"]
+        appointmentId:
+          type: [string, "null"]
+        visitDate:
+          type: string
+          format: date
+        symptoms:
+          type: [string, "null"]
+        notes:
+          type: [string, "null"]
+        followUpDate:
+          type: [string, "null"]
+          format: date
+    Thread:
+      type: object
+      properties:
+        id:
+          type: string
+        clinicId:
+          type: string
+        patientId:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [open, escalated, closed]
+        unreadCount:
+          type: integer
+    Task:
+      type: object
+      properties:
+        id:
+          type: string
+        clinicId:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [open, done]
+        dueAt:
+          type: [string, "null"]
+    Invoice:
+      type: object
+      properties:
+        id:
+          type: string
+        clinicId:
+          type: string
+        amountInr:
+          type: number
+        status:
+          type: string
+          enum: [pending, paid, failed, refunded]
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SimpleError"
+          examples:
+            unauthorized:
+              value:
+                error: Unauthorized
+    InternalServerError:
+      description: Unhandled server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SimpleError"
+          examples:
+            internal:
+              value:
+                error: Internal server error
+paths:
+  /health:
+    get:
+      summary: Health check.
+      responses:
+        "200":
+          description: Service is running.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service, timestamp]
+                properties:
+                  ok:
+                    const: true
+                  service:
+                    const: schedurx-backend
+                  timestamp:
+                    type: string
+                    format: date-time
+  /internal/call-context/resolve:
+    post:
+      summary: Resolve clinicId/patientId for an inbound call, before the Ultravox call exists.
+      description: >
+        Called once by schedurx-ultravox-demo-api's call-service per inbound Twilio call.
+        Never throws — returns nulls on any lookup failure so the call can still connect.
+      security:
+        - InternalBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toPhone, fromPhone]
+              properties:
+                toPhone:
+                  type: string
+                fromPhone:
+                  type: string
+      responses:
+        "200":
+          description: Resolved (or null) context.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [clinicId, patientId, isNewPatient]
+                properties:
+                  clinicId:
+                    type:
+                      - string
+                      - "null"
+                  patientId:
+                    type:
+                      - string
+                      - "null"
+                  isNewPatient:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /tools/debug/echo:
+    post:
+      summary: No-auth diagnostic echo tool.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Echo response.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message, received]
+                properties:
+                  message:
+                    type: string
+                  received:
+                    type: object
+                    required: [headers, body]
+                    properties:
+                      headers:
+                        type: object
+                        additionalProperties: true
+                      body:
+                        type: object
+                        additionalProperties: true
+  /tools/patients/identify:
+    post:
+      summary: Look up or create the caller patient for the current Ultravox call.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+                clinicId:
+                  type: string
+                  description: Static parameter baked in by the demo bridge at call-creation time.
+                phoneNumber:
+                  type: string
+                  description: Static parameter baked in by the demo bridge at call-creation time.
+      responses:
+        "200":
+          description: Existing patient found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Patient"
+        "201":
+          description: Patient created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Patient"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Call context missing clinic or caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /tools/patients/update:
+    post:
+      summary: Update patient demographic fields.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+                fullName:
+                  type:
+                    - string
+                    - "null"
+                age:
+                  type:
+                    - integer
+                    - "null"
+                gender:
+                  type:
+                    - string
+                    - "null"
+      responses:
+        "200":
+          description: Updated patient.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Patient"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Patient not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "422":
+          description: Patient ID missing from call context.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /tools/doctors/list:
+    post:
+      summary: List active doctors for the resolved clinic.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+      responses:
+        "200":
+          description: Doctor list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [doctors]
+                properties:
+                  doctors:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Doctor"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Clinic missing from call context.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /tools/doctors/select:
+    post:
+      summary: Resolve a spoken doctor name and store it in call context.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+                doctorName:
+                  type: string
+      responses:
+        "200":
+          description: Doctor selected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Doctor"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No doctor matched.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, availableDoctors]
+                properties:
+                  error:
+                    type: string
+                  availableDoctors:
+                    type: array
+                    items:
+                      type: string
+        "422":
+          description: Missing doctorName or clinic context.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /tools/appointments/book:
+    post:
+      summary: Create a calendar-blocked appointment.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+                slotStart:
+                  type: string
+                slotEnd:
+                  type:
+                    - string
+                    - "null"
+                appointmentType:
+                  type: string
+                reason:
+                  type:
+                    - string
+                    - "null"
+      responses:
+        "201":
+          description: Appointment booked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarSuccess"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Slot no longer available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+        "422":
+          description: Missing clinic, doctor, or slotStart.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+        "500":
+          description: Scheduler or internal error in structured tool format.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+  /tools/appointments/send-form:
+    post:
+      summary: Log the intake form URL for manual delivery.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+      responses:
+        "200":
+          description: Form URL logged.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivered, note, formUrl]
+                properties:
+                  delivered:
+                    const: false
+                  note:
+                    type: string
+                  formUrl:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: No booked appointment in call context.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimpleError"
+  /tools/calendar/slots:
+    post:
+      summary: Get available calendar slots for the selected doctor.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+                date:
+                  type: string
+                dateRange:
+                  type: object
+                  properties:
+                    start:
+                      type: string
+                    end:
+                      type: string
+                timezone:
+                  type: string
+      responses:
+        "200":
+          description: Available slots, or a structured NO_SLOTS_AVAILABLE tool error.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/CalendarSuccess"
+                  - $ref: "#/components/schemas/StructuredToolError"
+        "400":
+          description: Invalid timezone.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Missing context or scheduling validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+        "500":
+          description: Scheduler or internal error in structured tool format.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+  /tools/calendar/reschedule:
+    post:
+      summary: Reschedule a calendar appointment.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+                appointmentId:
+                  type: string
+                newStart:
+                  type: string
+                newEnd:
+                  type:
+                    - string
+                    - "null"
+                reason:
+                  type:
+                    - string
+                    - "null"
+      responses:
+        "200":
+          description: Appointment rescheduled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarSuccess"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: New slot no longer available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+        "422":
+          description: Missing context or validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+        "500":
+          description: Scheduler or internal error in structured tool format.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+  /tools/calendar/cancel:
+    post:
+      summary: Cancel a calendar appointment.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ultravoxCallId:
+                  type: string
+                appointmentId:
+                  type: string
+                reason:
+                  type:
+                    - string
+                    - "null"
+      responses:
+        "200":
+          description: Appointment cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarSuccess"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Missing context or cancellation validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+        "500":
+          description: Scheduler or internal error in structured tool format.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StructuredToolError"
+
+  # ── /internal/staff — bootstrap only ──────────────────────────────────────────
+  /internal/staff:
+    post:
+      summary: Create a Staff row and set the matching Firebase custom claims.
+      description: >
+        Bootstrap-only. Never called by the browser — an internal admin flow
+        calls this once per new dashboard login.
+      security:
+        - InternalBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [firebaseUid, clinicId, role]
+              properties:
+                firebaseUid: { type: string }
+                clinicId: { type: string }
+                doctorId: { type: [string, "null"] }
+                email: { type: [string, "null"] }
+                phone: { type: [string, "null"] }
+                fullName: { type: [string, "null"] }
+                role: { type: string, enum: [doctor, receptionist, owner] }
+      responses:
+        "200":
+          description: Staff onboarded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Missing required fields or invalid role.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /internal/clinic — bootstrap only ─────────────────────────────────────────
+  /internal/clinic:
+    post:
+      summary: >
+        Create a brand-new Clinic + first Doctor, provision nettu-scheduler
+        calendars, and create the owner Staff row (sets Firebase custom claims).
+      description: >
+        Bootstrap-only. Never called by the browser — the frontend's server-side
+        onboarding route handler calls this once per new clinic signup. Unlike
+        /internal/staff (which only attaches Staff to an existing clinicId), this
+        is the only place a new Clinic row gets created.
+      security:
+        - InternalBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [firebaseUid, clinicName]
+              properties:
+                firebaseUid: { type: string }
+                email: { type: [string, "null"] }
+                phone: { type: [string, "null"] }
+                fullName: { type: [string, "null"] }
+                clinicName: { type: string }
+                timezone: { type: [string, "null"] }
+                workingDays: { type: [array, "null"], items: { type: string } }
+                openingHour: { type: [integer, "null"] }
+                closingHour: { type: [integer, "null"] }
+                doctor:
+                  type: [object, "null"]
+                  properties:
+                    fullName: { type: [string, "null"] }
+                    specialty: { type: [string, "null"] }
+                    qualification: { type: [string, "null"] }
+                    feeInr: { type: [number, "null"] }
+                    languages: { type: [array, "null"], items: { type: string } }
+      responses:
+        "200":
+          description: Clinic onboarded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Missing required fields.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /webhooks/stripe ──────────────────────────────────────────────────────────
+  /webhooks/stripe:
+    post:
+      summary: Stripe webhook — marks an Invoice paid on checkout.session.completed.
+      description: >
+        Only mounted when STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET are configured.
+        Requires the raw request body for signature verification (see app.js's
+        mount ordering relative to express.json()).
+      responses:
+        "200":
+          description: Event received (and handled, if it's a recognized type).
+        "400":
+          description: Signature verification failed.
+
+  # ── /api/v1 — Firebase-authenticated dashboard REST layer ────────────────────
+  # Only mounted when Firebase Admin is configured. Every route below requires
+  # FirebaseBearerAuth and scopes strictly to the token's clinicId claim.
+  /api/v1/me:
+    get:
+      summary: Return the authenticated staff member's resolved claims.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Staff claims.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/appointments:
+    get:
+      summary: List appointments for the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: date, in: query, schema: { type: string, format: date } }
+        - { name: doctorId, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Appointments for the caller's clinic only.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    post:
+      summary: Book a new appointment (dashboard reception flow).
+      description: >
+        Reuses the same appointmentSvc.bookAppointment the voice-agent tool
+        uses — nettu-scheduler conflict detection and booking-window rules
+        apply identically regardless of who's booking. Resolves the patient
+        via findOrCreatePatient server-side.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [doctorId, start, patient]
+              properties:
+                doctorId: { type: string }
+                start: { type: string, description: ISO 8601 instant. }
+                end: { type: [string, "null"] }
+                reason: { type: [string, "null"] }
+                notes: { type: [string, "null"] }
+                bookerRelation: { type: string, enum: [self, proxy] }
+                proxyName: { type: [string, "null"] }
+                patient:
+                  type: object
+                  required: [phone]
+                  properties:
+                    phone: { type: string }
+                    name: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Appointment booked.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "422":
+          description: Missing fields, slot outside booking window, or scheduling rule violation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+        "409":
+          description: Slot no longer available.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/patients:
+    get:
+      summary: List or search patients for the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - name: q
+          in: query
+          description: Ranked trigram search on name/phone; omit for a plain list.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Patients for the caller's clinic only.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/patients/{id}:
+    get:
+      summary: Get one patient by id (must belong to the caller's clinic).
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The patient.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "404":
+          description: Patient not found in this clinic.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/team:
+    get:
+      summary: List doctors and staff for the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: role, in: query, schema: { type: string, enum: [doctor, receptionist, owner] } }
+      responses:
+        "200":
+          description: Doctors and staff.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/queue:
+    get:
+      summary: List the live queue for the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: doctorId, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Queue items (excludes status=done).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/queue/walk-in:
+    post:
+      summary: Add a walk-in patient to a doctor's queue.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [doctorId]
+              properties:
+                doctorId: { type: string }
+                patientId: { type: [string, "null"] }
+                displayName: { type: [string, "null"] }
+                phoneNumber: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Walk-in queue item created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/queue/advance:
+    post:
+      summary: Move the "now serving" pointer for a doctor's queue.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [doctorId, direction]
+              properties:
+                doctorId: { type: string }
+                direction: { type: string, enum: [next, prev, jumpTo] }
+                targetId: { type: [string, "null"] }
+      responses:
+        "200":
+          description: The new "now serving" queue item (or null if the queue is clear).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/queue/order:
+    patch:
+      summary: Reorder the queue (receptionist drag-to-reorder).
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: The reordered queue.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/realtime-token:
+    get:
+      summary: Mint a short-lived Supabase Realtime token scoped to the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Token for opening a Supabase Realtime subscription on QueueItem.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "501":
+          description: SUPABASE_JWT_SECRET is not configured — poll GET /api/v1/queue instead.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/visits:
+    get:
+      summary: List visits for a patient.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: patientId, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Visit history for the patient.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    post:
+      summary: Create a visit record.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Visit" }
+      responses:
+        "201":
+          description: Visit created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/visits/{id}:
+    patch:
+      summary: Update a visit (notes, follow-up date, Rx flags).
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Updated visit.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/clinic-settings:
+    get:
+      summary: Get the caller's clinic feature-toggle settings.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Settings JSON.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    patch:
+      summary: Update clinic settings. Owner role only.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Updated settings JSON.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "403":
+          description: Caller's role is not 'owner'.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/threads:
+    get:
+      summary: List consult threads for the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [open, escalated, closed] } }
+      responses:
+        "200":
+          description: Threads.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/threads/{id}/messages:
+    get:
+      summary: List messages in a thread.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Messages, oldest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    post:
+      summary: >
+        Send a reply (doctor/owner only). Persists regardless of WhatsApp
+        delivery status — see src/services/whatsapp-client.js, currently stubbed.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties: { body: { type: string } }
+      responses:
+        "201":
+          description: Message sent (or queued, if WhatsApp isn't configured yet).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "403":
+          description: Caller's role is not doctor/owner.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/threads/{id}/escalate:
+    post:
+      summary: Escalate a thread to critical (receptionist/owner only).
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Updated thread.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "403":
+          description: Caller's role is not receptionist/owner.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/threads/{id}/read:
+    patch:
+      summary: Clear the unread count on a thread.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Updated thread.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/notifications:
+    get:
+      summary: List notifications for the caller (own + clinic-broadcast).
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Notifications.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/notifications/read-all:
+    patch:
+      summary: Mark all of the caller's notifications read.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/tasks:
+    get:
+      summary: List tasks assigned to the caller.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Tasks.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    post:
+      summary: Create a task.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                dueAt: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Task created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/tasks/{id}:
+    patch:
+      summary: Toggle a task done/open.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Updated task.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    delete:
+      summary: Delete a task.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Deleted.
+
+  /api/v1/push-subscriptions:
+    post:
+      summary: Register a browser push subscription for the caller.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscription]
+              properties:
+                subscription:
+                  type: object
+                  required: [endpoint, keys]
+      responses:
+        "201":
+          description: Subscription saved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/analytics/summary:
+    get:
+      summary: Daily appointment/revenue/no-show rollup for the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 30 } }
+      responses:
+        "200":
+          description: Daily rows + totals, read from the day_stats materialized view.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/analytics/refresh:
+    post:
+      summary: Refresh the day_stats materialized view on demand.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/billing/invoices:
+    get:
+      summary: List invoices for the caller's clinic. Works without Stripe configured.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, paid, failed, refunded] } }
+      responses:
+        "200":
+          description: Invoices.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    post:
+      summary: Create an invoice.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amountInr]
+              properties:
+                amountInr: { type: number }
+                patientId: { type: [string, "null"] }
+                appointmentId: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Invoice created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/billing/checkout-session:
+    post:
+      summary: Create a Stripe Checkout Session for an invoice.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invoiceId, successUrl, cancelUrl]
+              properties:
+                invoiceId: { type: string }
+                successUrl: { type: string }
+                cancelUrl: { type: string }
+      responses:
+        "200":
+          description: Checkout URL.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "503":
+          description: STRIPE_SECRET_KEY is not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/ai/triage:
+    post:
+      summary: Classify a patient message as critical/moderate/routine (OpenAI-backed).
+      description: Only mounted when OPENAI_API_KEY is configured.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties: { text: { type: string } }
+      responses:
+        "200":
+          description: "{ triage, summary }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/appointments/block:
+    post:
+      summary: Reserve calendar time with no patient attached (a real nettu busy event, not just a UI flag).
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [doctorId, start]
+              properties:
+                doctorId: { type: string }
+                start: { type: string }
+                end: { type: [string, "null"] }
+                reason: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Block created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "409":
+          description: A real booking already exists in that window.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/appointments/{id}:
+    patch:
+      summary: Reschedule an appointment.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [doctorId, newStart]
+              properties:
+                doctorId: { type: string }
+                newStart: { type: string }
+                newEnd: { type: [string, "null"] }
+                reason: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Rescheduled — status stays "booked" (or "blocked"), never a literal "rescheduled".
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "422":
+          description: Outside the reschedule cutoff window, or missing fields.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+        "409":
+          description: New slot no longer available.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+    delete:
+      summary: Cancel an appointment.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { reason: { type: [string, "null"] } }
+      responses:
+        "200":
+          description: Cancelled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "422":
+          description: Outside the cancellation cutoff window, or already cancelled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/doctors ────────────────────────────────────────────────────────────
+  /api/v1/doctors/{id}:
+    patch:
+      summary: Edit a doctor's own fee/slot length/hours/bio.
+      description: Restricted to the doctor themselves or the clinic owner — 403 for anyone else.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                feeInr: { type: [number, "null"] }
+                slotDurationOverrideMins: { type: [integer, "null"] }
+                bio: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Updated doctor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "403":
+          description: Caller is neither this doctor nor the clinic owner.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/clinic ─────────────────────────────────────────────────────────────
+  /api/v1/clinic:
+    get:
+      summary: Core clinic profile (name/address/phone/logo/hours). Read-only.
+      description: Distinct from /clinic-settings, which holds the jsonb feature-toggle blob.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: The clinic.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  # ── /api/v1/media ──────────────────────────────────────────────────────────────
+  /api/v1/media/transcribe:
+    post:
+      summary: Ephemeral speech-to-text (OpenAI Whisper) for the Consults voice-reply mic button.
+      description: Nothing is persisted — the transcript just fills the text-reply box client-side.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [audioBase64]
+              properties:
+                audioBase64: { type: string, description: Base64-encoded audio clip. }
+                filename: { type: [string, "null"] }
+      responses:
+        "200":
+          description: "{ text }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "503":
+          description: OPENAI_API_KEY is not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/visits (attachments/recap) ────────────────────────────────────────
+  /api/v1/visits/{id}/upload-url:
+    post:
+      summary: Get a Supabase Storage signed upload URL for an attachment.
+      description: The browser PUTs the file bytes directly to Storage — never through this server.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileName]
+              properties:
+                fileName: { type: string }
+                contentType: { type: [string, "null"] }
+      responses:
+        "200":
+          description: "{ path, uploadUrl }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/visits/{id}/attachments:
+    post:
+      summary: Record a completed direct-to-storage upload on the visit.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, type]
+              properties:
+                path: { type: string }
+                type: { type: string, enum: [photo, digital] }
+      responses:
+        "201":
+          description: Attachment recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/visits/{id}/attachments/read-url:
+    get:
+      summary: Short-lived signed read URL for a private-bucket attachment.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: path
+          in: query
+          required: true
+          description: Must be prefixed "{clinicId}/{visitId}/" — otherwise 403.
+          schema: { type: string }
+      responses:
+        "200":
+          description: "{ url }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "403":
+          description: path does not belong to this clinic/visit.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/visits/{id}/recap:
+    post:
+      summary: Turn a doctor's recap (typed or recorded) into a structured clinical note, saved onto the visit.
+      description: Backs both manual "Recap" capture mode and ambient capture.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text: { type: [string, "null"] }
+                audioBase64: { type: [string, "null"] }
+                filename: { type: [string, "null"] }
+      responses:
+        "200":
+          description: "{ visit, transcript }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "422":
+          description: Neither text nor audioBase64 given, or the recording was silent.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+        "503":
+          description: OPENAI_API_KEY is not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/call-logs, /api/v1/wa-logs ────────────────────────────────────────
+  /api/v1/call-logs:
+    get:
+      summary: List the AI voice agent's call history for the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Call logs.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/wa-logs:
+    get:
+      summary: List automated WhatsApp sends (bookings, reminders, follow-ups, Rx) for the caller's clinic.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: WhatsApp activity log.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  # ── /api/v1/phone-routes ───────────────────────────────────────────────────────
+  /api/v1/phone-routes:
+    get:
+      summary: List real clinic/doctor numbers that forward missed calls to the shared ScheduRx number.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Routes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    post:
+      summary: Register a phone route. Owner only.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [originalNumber]
+              properties:
+                originalNumber: { type: string }
+                doctorId: { type: [string, "null"], description: Omit for a clinic-wide route. }
+      responses:
+        "201":
+          description: Route created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "403":
+          description: Caller's role is not 'owner'.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/phone-routes/{id}:
+    patch:
+      summary: Update a phone route (e.g. toggle active). Owner only.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { isActive: { type: boolean } }
+      responses:
+        "200":
+          description: Updated route.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "403":
+          description: Caller's role is not 'owner'.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+    delete:
+      summary: Remove a phone route. Owner only.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Deleted.
+        "403":
+          description: Caller's role is not 'owner'.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/notifications (item-level) ────────────────────────────────────────
+  /api/v1/notifications/{id}/read:
+    patch:
+      summary: Mark one notification read.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Updated notification.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/notifications/{id}:
+    delete:
+      summary: Remove a notification.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Deleted.
+
+  # ── /api/v1/analytics (utilization, practice-pulse) ───────────────────────────
+  /api/v1/analytics/utilization:
+    get:
+      summary: Per-doctor slot-utilization percentage.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 7 } }
+      responses:
+        "200":
+          description: Utilization rows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+
+  /api/v1/analytics/practice-pulse:
+    get:
+      summary: One AI-generated insight about the practice's recent activity (OpenAI-backed).
+      description: Only functional when OPENAI_API_KEY is configured — 503 otherwise.
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: "{ insights: string[] }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "503":
+          description: OPENAI_API_KEY is not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/team/invites ───────────────────────────────────────────────────────
+  /api/v1/team/invites:
+    post:
+      summary: Create a pending staff invite and text the accept link on WhatsApp. Doctor/owner only.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, role]
+              properties:
+                name: { type: [string, "null"] }
+                phone: { type: string }
+                role: { type: string, enum: [doctor, receptionist] }
+                doctorId: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Invite created (WhatsApp send is best-effort — invite is created either way).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "403":
+          description: Caller's role is not doctor/owner.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/assistant — "Ask ScheduRx" in-app AI chat ─────────────────────────
+  # Only mounted when the AI SDK model is configured (OPENAI_API_KEY).
+  /api/v1/assistant:
+    post:
+      summary: Streaming chat with the staff-facing AI assistant (tool-calling — block time, find a slot, patient history, add a task).
+      description: >
+        Streams an AI SDK UI-message response (Server-Sent Events), consumed
+        by @ai-sdk/react's useChat on the frontend — not a single JSON
+        response. Tools only ever act within the caller's own clinicId/staffId
+        from the verified session, never from model output.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messages]
+              properties:
+                messages:
+                  type: array
+                  items: { type: object, additionalProperties: true }
+                context:
+                  type: object
+                  properties: { doctorId: { type: [string, "null"] } }
+      responses:
+        "200":
+          description: SSE stream of UI message parts (text deltas, tool-call/tool-result events).
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /api/v1/assistant/speak:
+    post:
+      summary: Synthesize a short reply's text into speech (ElevenLabs).
+      description: Only functional when ELEVENLABS_API_KEY is configured — 503 otherwise.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties: { text: { type: string } }
+      responses:
+        "200":
+          description: "{ audioBase64 }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "503":
+          description: ELEVENLABS_API_KEY is not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/public — unauthenticated patient-facing booking API ──────────────
+  # Mounted before the FirebaseBearerAuth-gated /api/v1 router, so these never
+  # pass through staff auth. Capability model: an appointment is addressed by
+  # its unguessable id PLUS its clinicId (same pattern as team-invite tokens) —
+  # no separate patient login. Rate-limited (10 req/min per IP by default).
+  # This is schedurx-form-agent's real backend — booking through it fires the
+  # same booking_confirmed WhatsApp workflow every other booking path does.
+  /api/v1/public/clinic/{clinicId}:
+    get:
+      summary: Doctor roster + booking-relevant clinic info, stripped of anything internal.
+      parameters:
+        - { name: clinicId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: "{ id, name, phone, timezone, doctors: [...] }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "404":
+          description: Clinic not found (or inactive).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+        "429":
+          description: Rate limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/public/slots:
+    get:
+      summary: Available booking slots for a doctor.
+      parameters:
+        - { name: clinicId, in: query, required: true, schema: { type: string } }
+        - { name: doctorId, in: query, required: true, schema: { type: string } }
+        - { name: date, in: query, schema: { type: string, format: date } }
+      responses:
+        "200":
+          description: "{ slots: [...], timezone, startDate, endDate }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "503":
+          description: Calendar scheduling is not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/public/appointments:
+    post:
+      summary: Book an appointment from the public patient-facing form.
+      description: >
+        Resolves the patient via findOrCreatePatient server-side — never
+        trusts a client-supplied patientId. Fires the booking_confirmed
+        WhatsApp workflow, same as every other booking path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clinicId, doctorId, start, patient]
+              properties:
+                clinicId: { type: string }
+                doctorId: { type: string }
+                start: { type: string }
+                end: { type: [string, "null"] }
+                patient:
+                  type: object
+                  required: [phone]
+                  properties:
+                    phone: { type: string, description: "10-digit Indian mobile, optionally +91/91/0-prefixed." }
+                    fullName: { type: [string, "null"] }
+                    age: { type: [integer, "null"] }
+                    gender: { type: [string, "null"] }
+                reason: { type: [string, "null"] }
+                notes: { type: [string, "null"] }
+                bookerRelation: { type: [string, "null"], enum: [self, proxy, null] }
+                proxyName: { type: [string, "null"] }
+      responses:
+        "201":
+          description: "{ appointment, patient }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "422":
+          description: Missing fields, invalid phone, or scheduling rule violation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+        "409":
+          description: Slot no longer available.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+        "429":
+          description: Rate limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/public/appointments/{id}:
+    get:
+      summary: Appointment + patient + doctor summary, for the confirmation/manage page.
+      description: Requires clinicId to match — the unguessable-link capability model, not a separate auth check.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: clinicId, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: "{ appointment, patient, doctor, clinic }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "404":
+          description: Not found (wrong clinicId also 404s, not 403 — doesn't confirm the id exists elsewhere).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+    patch:
+      summary: Reschedule an appointment from the public manage page.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clinicId, newStart]
+              properties:
+                clinicId: { type: string }
+                doctorId: { type: [string, "null"], description: Defaults to the appointment's existing doctor. }
+                newStart: { type: string }
+                newEnd: { type: [string, "null"] }
+                reason: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Rescheduled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "422":
+          description: Outside the reschedule cutoff window.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+    delete:
+      summary: Cancel an appointment from the public manage page.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clinicId]
+              properties:
+                clinicId: { type: string }
+                reason: { type: [string, "null"] }
+      responses:
+        "200":
+          description: Cancelled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "422":
+          description: Outside the cancellation cutoff window, or already cancelled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /internal/staff/invites — bootstrap only ──────────────────────────────────
+  /internal/staff/invites/{token}:
+    get:
+      summary: Look up a pending staff invite (who/what it's for), before the invitee has signed in.
+      security:
+        - InternalBearerAuth: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: "{ invite: { name, role, clinicName } }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /internal/staff/invites/{token}/accept:
+    post:
+      summary: Accept a staff invite — creates the Staff row and sets Firebase custom claims.
+      security:
+        - InternalBearerAuth: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [firebaseUid]
+              properties:
+                firebaseUid: { type: string }
+                email: { type: [string, "null"] }
+      responses:
+        "200":
+          description: "{ staff }"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Invite already accepted, expired, or missing firebaseUid.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /webhooks/nettu-reminders ──────────────────────────────────────────────────
+  /webhooks/nettu-reminders:
+    post:
+      summary: Reminder callback from nettu-scheduler — turns a due reminder into a Notification (+ best-effort push, + delayed comms-workflow message).
+      description: Only mounted when NETTU_WEBHOOK_KEY is configured.
+      security:
+        - NettuWebhookKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: The full nettu CalendarEvent, including the metadata stamped onto it at booking time.
+      responses:
+        "200":
+          description: Processed (best-effort — never blocks nettu with an error for a downstream failure).
+        "401":
+          description: Wrong or missing webhook key.
+
+  # ── /webhooks/twilio — Voice + WhatsApp ───────────────────────────────────────
+  # Only mounted when TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN are configured.
+  # Every route requires a valid X-Twilio-Signature and application/x-www-form-urlencoded
+  # body (Twilio's webhook format, not JSON).
+  /webhooks/twilio/voice:
+    post:
+      summary: Inbound call — resolves the clinic by the dialed number and returns TwiML.
+      description: >
+        Plays a cached ElevenLabs greeting if one exists for this clinic
+        (synthesized once, cached in Clinic.settings.communication), else
+        Twilio's built-in <Say> voice while caching one in the background for
+        next time.
+      security:
+        - TwilioSignatureAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              {
+                type: object,
+                additionalProperties: true,
+                description: "Twilio's standard voice webhook params (From, To, CallSid, ...).",
+              }
+      responses:
+        "200":
+          description: TwiML response.
+          content:
+            text/xml:
+              schema: { type: string }
+
+  /webhooks/twilio/voice-status:
+    post:
+      summary: Call status callback — logs the call and, on "completed", triggers the missed-call follow-up workflow if one is configured.
+      security:
+        - TwilioSignatureAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              { type: object, additionalProperties: true, description: "CallSid, CallStatus, CallDuration, From, ..." }
+      responses:
+        "200":
+          description: Always 200 — never makes Twilio retry over a follow-up-send failure.
+
+  /webhooks/twilio/whatsapp-inbound:
+    post:
+      summary: Inbound WhatsApp message — routes to the AI patient agent, scoped strictly to the sender's own phone-verified data.
+      description: >
+        Deduplicates by MessageSid before AI processing (Twilio retries slow
+        webhooks, and a retry must not re-run a reschedule/cancel a second
+        time). Best-effort AI triage classification runs on the resulting
+        Thread. Empty TwiML is always returned — replies are sent
+        out-of-band via the REST API, not inline TwiML.
+      security:
+        - TwilioSignatureAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object, additionalProperties: true, description: "From, To, Body, MessageSid, ..." }
+      responses:
+        "200":
+          description: Empty TwiML.
+          content:
+            text/xml:
+              schema: { type: string }
+
+  /webhooks/twilio/message-status:
+    post:
+      summary: Outbound message delivery status callback. Logged only.
+      security:
+        - TwilioSignatureAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object, additionalProperties: true, description: "MessageSid, MessageStatus, ..." }
+      responses:
+        "200":
+          description: Acknowledged.
+
+  # ── /tools/call-logs — machine-facing, independent of Ultravox call context ──
+  /tools/call-logs:
+    post:
+      summary: Create a call-log row directly (clinicId + phone in the body, not sourced from an in-flight Ultravox call context).
+      description: For a future caller like schedurx-calling-agent to post once a call ends.
+      security:
+        - ToolsBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clinicId, phone]
+              properties:
+                clinicId: { type: string }
+                patientId: { type: [string, "null"] }
+                phone: { type: string }
+                name: { type: [string, "null"] }
+                lang: { type: [string, "null"] }
+                durationSec: { type: [integer, "null"] }
+                outcome: { type: [string, "null"] }
+                summary: { type: [string, "null"] }
+                recordingUrl: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Call log created.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "422":
+          description: Missing clinicId or phone.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SimpleError" }
+        "500":
+          $ref: "#/components/responses/InternalServerError"

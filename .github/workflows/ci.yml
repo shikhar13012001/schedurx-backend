@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # Not a blocking gate yet — some pre-existing files predate a full
+      # Prettier pass. Flip to a hard failure once that's done.
+      - name: Format check (informational only)
+        run: npm run format:check
+        continue-on-error: true
+
+      - name: Test
+        run: npm test
+
+      - name: Validate OpenAPI spec parses
+        run: node -e "require('js-yaml').load(require('fs').readFileSync('docs/openapi.yaml', 'utf8'))"

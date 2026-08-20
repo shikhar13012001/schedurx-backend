@@ -1,0 +1,20 @@
+node_modules/
+coverage/
+npm-debug.log*
+
+.env
+.env.local
+.env.*.local
+
+# Firebase service-account key files — never commit these. The app reads
+# credentials from FIREBASE_PRIVATE_KEY_BASE64 (or FIREBASE_PRIVATE_KEY) in
+# .env instead; a downloaded service-account JSON is only ever a local,
+# temporary artifact for generating that value.
+*firebase-adminsdk*.json
+*serviceAccount*.json
+
+.DS_Store
+*.log
+
+# Pre-existing, unrelated scratch content — not part of this backend.
+temp.md

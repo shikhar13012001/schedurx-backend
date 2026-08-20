@@ -1,0 +1,5 @@
+node_modules/
+coverage/
+docs/live-schema-baseline.md
+scheduler-frontend/
+temp.md

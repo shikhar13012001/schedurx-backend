@@ -1,0 +1,50 @@
+{
+  "name": "schedurx-backend",
+  "version": "1.0.0",
+  "description": "Schedurx clinic backend — patients, doctors, appointments, and calendar tools backed by Supabase and nettu-scheduler",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "lint": "eslint . --ext .js",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify": "npm run lint && npm run format:check && npm test",
+    "setup:clinic-calendar": "node scripts/setup-clinic-calendars.js",
+    "setup:clinic-calendar:verbose": "node scripts/setup-clinic-calendars.js --verbose",
+    "setup:storage-bucket": "node scripts/setup-storage-bucket.js",
+    "setup:voice-bucket": "node scripts/setup-voice-bucket.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.42",
+    "@supabase/supabase-js": "^2.108.1",
+    "ai": "^7.0.66",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "firebase-admin": "^14.2.0",
+    "js-yaml": "^4.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "openai": "^4.77.0",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
+    "stripe": "^17.5.0",
+    "swagger-ui-express": "^5.0.1",
+    "twilio": "^6.1.0",
+    "web-push": "^3.6.7",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6"
+  }
+}
