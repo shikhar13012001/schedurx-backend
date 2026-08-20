@@ -6,6 +6,11 @@ const { makeId } = require("../lib/ids");
 
 // Creates a new Doctor row. Scheduler IDs (nettu user/calendar) are attached
 // later by calendarSvc.getOrCreateDoctorCalendar — see internal-clinic-onboarding.js.
+// feeInr is a NOT NULL column on the live table (predates this repo's
+// migrations, not documented in docs/live-schema-baseline.md) — the
+// onboarding bootstrap creates this row before the fee is ever collected
+// (that happens a screen later via updateDoctorOnboardingProfile), so this
+// can't rely on the caller always having a real value yet.
 async function createDoctor(supabaseClient, { clinicId, fullName, specialty, qualification, feeInr, languages }) {
   const now = new Date().toISOString();
   const { data, error } = await supabaseClient
@@ -16,7 +21,7 @@ async function createDoctor(supabaseClient, { clinicId, fullName, specialty, qua
       fullName,
       specialty: specialty ?? null,
       qualification: qualification ?? null,
-      feeInr: feeInr ?? null,
+      feeInr: feeInr ?? 0,
       languages: languages ?? null,
       isActive: true,
       createdAt: now,
