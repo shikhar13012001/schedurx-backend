@@ -126,6 +126,32 @@ function resolveBookingWindow(opts, clinicRules) {
   return { startDate, endDate };
 }
 
+// Recurring daily breaks (Doctor.breaks — see the onboarding migration and
+// doctor-service.js) apply the same way every working day, so filtering is
+// purely a same-day local-time overlap check — no calendar event exists for
+// nettu-scheduler to already exclude these on its own.
+function localMinutesOfDay(epochMs, timezone) {
+  const iso = epochToISO(epochMs, timezone);
+  const match = iso.match(/T(\d{2}):(\d{2})/);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function overlapsBreak(startMs, endMs, timezone, breaks) {
+  if (!breaks?.length) return false;
+  const startMin = localMinutesOfDay(startMs, timezone);
+  const endMin = localMinutesOfDay(endMs, timezone);
+  if (startMin == null || endMin == null) return false;
+  return breaks.some((b) => {
+    const [bsH, bsM] = String(b?.start ?? "").split(":").map(Number);
+    const [beH, beM] = String(b?.end ?? "").split(":").map(Number);
+    if (Number.isNaN(bsH) || Number.isNaN(beH)) return false;
+    const breakStart = bsH * 60 + (bsM || 0);
+    const breakEnd = beH * 60 + (beM || 0);
+    return startMin < breakEnd && endMin > breakStart;
+  });
+}
+
 // ─── Public ───────────────────────────────────────────────────────────────────
 
 // Returns an array of bookable slot objects for the requested doctor and date range.
@@ -175,7 +201,9 @@ async function getAvailableSlots(nettuClient, supabaseClient, opts, log) {
     .filter((slot) => {
       // nettu may return start as epoch ms or as an ISO string
       const startMs = typeof slot.start === "number" ? slot.start : new Date(slot.start).getTime();
-      return startMs > now; // never return past slots
+      if (startMs <= now) return false; // never return past slots
+      const slotDurMs = slot.duration ?? durationMs;
+      return !overlapsBreak(startMs, startMs + slotDurMs, timezone, doctor.breaks);
     })
     .map((slot) => {
       const startMs = typeof slot.start === "number" ? slot.start : new Date(slot.start).getTime();

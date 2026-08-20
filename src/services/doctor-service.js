@@ -60,6 +60,65 @@ async function updateDoctor(supabaseClient, doctorId, patch) {
   return data;
 }
 
+// ─── Onboarding profile (screen 3 — richer than the Profile screen's narrow
+// EDITABLE_FIELDS above, since onboarding is the one place the full
+// professional-profile/website-feeding fields get written) ────────────────
+
+const MAX_PHOTOS = 5;
+
+const ONBOARDING_PROFILE_FIELDS = [
+  "fullName",
+  "specialty",
+  "qualification",
+  "bio",
+  "headline",
+  "languages",
+  "personalPhone",
+  "upiId",
+  "photos",
+  "qualifications",
+  "registrations",
+  "affiliations",
+  "services",
+  "awards",
+  "memberships",
+  "consultationModes",
+  "additionalInfo",
+  "feeInr",
+  "slotDurationOverrideMins",
+  "workingHoursStart",
+  "workingHoursEnd",
+  "workingDaysOverride",
+  "breaks",
+];
+
+async function updateDoctorOnboardingProfile(supabaseClient, doctorId, patch) {
+  const updates = {};
+  for (const field of ONBOARDING_PROFILE_FIELDS) {
+    if (field in patch) updates[field] = patch[field];
+  }
+  if ("photos" in updates && Array.isArray(updates.photos) && updates.photos.length > MAX_PHOTOS) {
+    throw Object.assign(new Error(`A doctor profile can have at most ${MAX_PHOTOS} photos`), {
+      code: "TOO_MANY_PHOTOS",
+      statusCode: 422,
+    });
+  }
+  if (Object.keys(updates).length === 0) {
+    throw Object.assign(new Error("No editable fields provided"), { code: "MISSING_FIELDS", statusCode: 422 });
+  }
+  updates.updatedAt = new Date().toISOString();
+
+  const { data, error } = await supabaseClient.from("Doctor").update(updates).eq("id", doctorId).select().maybeSingle();
+  if (error)
+    throw Object.assign(new Error(`DB error updating doctor profile: ${error.message}`), {
+      code: "DATABASE_ERROR",
+      statusCode: 500,
+    });
+  if (!data)
+    throw Object.assign(new Error(`Doctor '${doctorId}' not found`), { code: "DOCTOR_NOT_FOUND", statusCode: 404 });
+  return data;
+}
+
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
 async function getDoctor(supabaseClient, doctorId) {
@@ -87,6 +146,17 @@ async function requireActiveDoctor(supabaseClient, doctorId, clinicId) {
   }
 
   return doctor;
+}
+
+// Solo-practice invite rule (see staff-invite-service.js): a Solo workspace
+// may have at most one active Doctor. A plain row fetch (not a count-only
+// head request) so this behaves identically against both the real client
+// and the in-memory test stub, which doesn't implement Supabase's `count`
+// option — clinics only ever have a handful of doctors, so this is cheap.
+async function countActiveDoctors(supabaseClient, clinicId) {
+  const { data, error } = await supabaseClient.from("Doctor").select("id").eq("clinicId", clinicId).eq("isActive", true);
+  if (error) throw Object.assign(new Error(`DB error counting doctors: ${error.message}`), { code: "DATABASE_ERROR" });
+  return data?.length ?? 0;
 }
 
 // Merges doctor-level scheduling rules on top of clinic defaults.
@@ -171,8 +241,11 @@ function matchDoctorByName(doctors, query) {
 module.exports = {
   createDoctor,
   updateDoctor,
+  updateDoctorOnboardingProfile,
+  MAX_PHOTOS,
   getDoctor,
   requireActiveDoctor,
+  countActiveDoctors,
   getSchedulingRules,
   saveSchedulerIds,
   matchDoctorByName,

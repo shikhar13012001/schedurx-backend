@@ -5,18 +5,24 @@
 // in tests) — only the network-calling pieces are faked.
 const { twiml } = require("twilio");
 
-function createTwilioStub({ shouldRejectSignature = false, sendResult = null, shouldFailSend = false } = {}) {
+function createTwilioStub({
+  shouldRejectSignature = false,
+  sendResult = null,
+  shouldFailSend = false,
+  shouldFailSms = false,
+  shouldFailWhatsApp = false,
+} = {}) {
   const calls = { sendSms: [], sendWhatsApp: [] };
   return {
     calls,
     async sendSms(opts) {
       calls.sendSms.push(opts);
-      if (shouldFailSend) throw new Error("Twilio send failed");
+      if (shouldFailSend || shouldFailSms) throw new Error("Twilio SMS send failed");
       return sendResult ?? { sid: "SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" };
     },
     async sendWhatsApp(opts) {
       calls.sendWhatsApp.push(opts);
-      if (shouldFailSend) throw new Error("Twilio send failed");
+      if (shouldFailSend || shouldFailWhatsApp) throw new Error("Twilio WhatsApp send failed");
       return sendResult ?? { sid: "SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" };
     },
     validateSignature() {

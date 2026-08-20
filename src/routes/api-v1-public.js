@@ -21,6 +21,7 @@ const tableSvc = require("../services/table-service");
 const clinicSvc = require("../services/clinic-service");
 const appointmentSvc = require("../services/appointment-service");
 const availabilitySvc = require("../services/availability-service");
+const { normalizeIndianMobile } = require("../lib/phone");
 
 // Ported from schedurx-form-agent's own POST /api/intake, which validated
 // phone numbers the same way before writing to its now-retired Prisma
@@ -29,14 +30,7 @@ const availabilitySvc = require("../services/availability-service");
 // implies an actual prefix (12 digits for "91...", 11 for a leading "0") —
 // stripping unconditionally breaks a bare 10-digit number that happens to
 // start with "91" (e.g. 9123456780), which is a valid number in its own right.
-function normalizePhone(raw) {
-  const digits = String(raw ?? "").replace(/\D/g, "");
-  let stripped = digits;
-  if (stripped.length === 12 && stripped.startsWith("91")) stripped = stripped.slice(2);
-  else if (stripped.length === 11 && stripped.startsWith("0")) stripped = stripped.slice(1);
-  if (!/^[6-9]\d{9}$/.test(stripped)) return null;
-  return `+91${stripped}`;
-}
+const normalizePhone = normalizeIndianMobile;
 
 function publicClinicView(clinic, doctors) {
   const rules = clinicSvc.getSchedulingRules(clinic);

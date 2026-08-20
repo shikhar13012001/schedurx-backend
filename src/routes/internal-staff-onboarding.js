@@ -27,6 +27,20 @@ function createInternalStaffOnboardingRouter(supabaseClient, firebaseAdminApp) {
     }
   });
 
+  // GET /internal/staff/invites/by-code/:shortCode — resolves a
+  // human-typed invite code (screen 1's "Enter invite code" box, before the
+  // invitee has a link to tap) to the same invite/token the link uses.
+  router.get("/invites/by-code/:shortCode", async (req, res) => {
+    try {
+      const invite = await staffInviteSvc.getInviteByShortCode(supabaseClient, req.params.shortCode);
+      const clinic = await clinicSvc.getClinic(supabaseClient, invite.clinicId);
+      return ok(res, { invite: { token: invite.token, name: invite.name, role: invite.role, clinicName: clinic?.name ?? null } });
+    } catch (err) {
+      req.log?.error({ err }, "[internalStaffOnboarding] invite code lookup failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
   // POST /internal/staff/invites/:token/accept — the invitee just signed in
   // with Google (getting a real firebaseUid for the first time), so the
   // Staff row + Firebase custom claims can finally be created.

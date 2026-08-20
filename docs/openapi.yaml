@@ -1888,7 +1888,7 @@ paths:
   # ── /api/v1/team/invites ───────────────────────────────────────────────────────
   /api/v1/team/invites:
     post:
-      summary: Create a pending staff invite and text the accept link on WhatsApp. Doctor/owner only.
+      summary: Create a pending staff invite and send the accept link on WhatsApp and SMS. Doctor/owner only.
       security: [{ FirebaseBearerAuth: [] }]
       requestBody:
         required: true
@@ -1904,7 +1904,7 @@ paths:
                 doctorId: { type: [string, "null"] }
       responses:
         "201":
-          description: Invite created (WhatsApp send is best-effort — invite is created either way).
+          description: Invite created (WhatsApp and SMS sends are independent and best-effort; invite creation succeeds either way).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ApiV1Success" }

@@ -76,6 +76,22 @@ const schema = z.object({
   // sender of its own configured for outbound SMS/WhatsApp.
   TWILIO_SMS_FROM: z.string().optional(),
   TWILIO_WHATSAPP_FROM: z.string().optional(),
+  // The number a clinic sets up call forwarding TO (see routes/api-v1-onboarding.js's
+  // call-forwarding step and lib/call-forwarding.js's dial-code templates).
+  // Falls back to TWILIO_WHATSAPP_FROM — the same shared number already
+  // answers /webhooks/twilio/voice today — so this only needs setting
+  // explicitly if the voice and messaging numbers are ever split apart.
+  TWILIO_FORWARDING_NUMBER: z.string().optional(),
+  // Optional Meta-approved Content Template for business-initiated team
+  // invites. Without it WhatsApp free-form delivery only works when the
+  // invitee already has an open 24-hour customer-service window.
+  TWILIO_TEAM_INVITE_CONTENT_SID: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z
+      .string()
+      .regex(/^HX[a-fA-F0-9]{32}$/)
+      .optional(),
+  ),
 
   // ── ElevenLabs (voice synthesis) — Ask ScheduRx speaks its replies aloud,
   // and the missed-call greeting upgrades from Twilio's built-in <Say> voice

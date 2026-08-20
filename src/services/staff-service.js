@@ -55,4 +55,65 @@ async function createStaff(supabaseClient, { clinicId, doctorId, firebaseUid, em
   return data;
 }
 
-module.exports = { getStaffByFirebaseUid, listStaffForClinic, createStaff };
+async function getStaffById(supabaseClient, staffId) {
+  const { data, error } = await supabaseClient.from("Staff").select("*").eq("id", staffId).maybeSingle();
+  if (error) throw dbErr(`fetching staff: ${error.message}`);
+  return data ?? null;
+}
+
+// ─── Onboarding (personal profile — screen 3, receptionist branch, and the
+// personal-hours section shared by both roles) ─────────────────────────────
+
+const STAFF_ONBOARDING_FIELDS = ["fullName", "phone", "workingDaysOverride", "workingHoursStart", "workingHoursEnd", "breaks"];
+
+async function updateStaffOnboardingProfile(supabaseClient, staffId, patch) {
+  const updates = {};
+  for (const field of STAFF_ONBOARDING_FIELDS) {
+    if (field in patch) updates[field] = patch[field];
+  }
+  if (Object.keys(updates).length === 0) {
+    throw Object.assign(new Error("No editable fields provided"), { code: "MISSING_FIELDS", statusCode: 422 });
+  }
+  updates.updatedAt = new Date().toISOString();
+
+  const { data, error } = await supabaseClient.from("Staff").update(updates).eq("id", staffId).select().maybeSingle();
+  if (error) throw dbErr(`updating staff profile: ${error.message}`);
+  if (!data) throw Object.assign(new Error(`Staff '${staffId}' not found`), { code: "STAFF_NOT_FOUND", statusCode: 404 });
+  return data;
+}
+
+const STAFF_ONBOARDING_STEPS = ["hours", "completed"];
+
+async function advanceStaffOnboardingStep(supabaseClient, staffId, step) {
+  if (!STAFF_ONBOARDING_STEPS.includes(step)) {
+    throw Object.assign(new Error(`Invalid onboarding step '${step}'`), { code: "INVALID_STEP", statusCode: 422 });
+  }
+  const { error } = await supabaseClient
+    .from("Staff")
+    .update({ onboardingStep: step, updatedAt: new Date().toISOString() })
+    .eq("id", staffId);
+  if (error) throw dbErr(`advancing staff onboarding step: ${error.message}`);
+}
+
+async function completeStaffOnboarding(supabaseClient, staffId) {
+  const { data, error } = await supabaseClient
+    .from("Staff")
+    .update({ onboardingCompleted: true, onboardingStep: "completed", updatedAt: new Date().toISOString() })
+    .eq("id", staffId)
+    .select()
+    .maybeSingle();
+  if (error) throw dbErr(`completing staff onboarding: ${error.message}`);
+  if (!data) throw Object.assign(new Error(`Staff '${staffId}' not found`), { code: "STAFF_NOT_FOUND", statusCode: 404 });
+  return data;
+}
+
+module.exports = {
+  getStaffByFirebaseUid,
+  getStaffById,
+  listStaffForClinic,
+  createStaff,
+  updateStaffOnboardingProfile,
+  advanceStaffOnboardingStep,
+  completeStaffOnboarding,
+  STAFF_ONBOARDING_STEPS,
+};

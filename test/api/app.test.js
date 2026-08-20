@@ -338,6 +338,116 @@ test("GET /api/v1/me requires a valid Firebase token and returns the resolved st
   });
 });
 
+test("POST /api/v1/team/invites normalizes the phone and sends WhatsApp and SMS independently", async () => {
+  const { config } = require("../../src/config");
+  const previousBaseUrl = config.APP_BASE_URL;
+  const previousContentSid = config.TWILIO_TEAM_INVITE_CONTENT_SID;
+  config.APP_BASE_URL = "https://app.schedurx.test";
+  config.TWILIO_TEAM_INVITE_CONTENT_SID = undefined;
+
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [{ id: "clinic-1", name: "Care Clinic", whatsappFrom: "+14155550100" }],
+    StaffInvite: [],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, twilioClient });
+
+  try {
+    await withServer(app, async ({ request }) => {
+      const response = await request("/api/v1/team/invites", {
+        method: "POST",
+        headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Dr. Test", phone: "+91 81234-51109", role: "doctor" }),
+      });
+      const body = await readJson(response);
+
+      assert.equal(response.status, 201);
+      assert.equal(body.data.invite.phone, "+918123451109");
+      assert.equal(twilioClient.calls.sendWhatsApp.length, 1);
+      assert.equal(twilioClient.calls.sendSms.length, 1);
+      assert.equal(twilioClient.calls.sendWhatsApp[0].to, "+918123451109");
+      assert.equal(twilioClient.calls.sendSms[0].to, "+918123451109");
+      assert.deepEqual(
+        body.data.delivery.map(({ channel, status }) => ({ channel, status })),
+        [
+          { channel: "whatsapp", status: "queued" },
+          { channel: "sms", status: "queued" },
+        ],
+      );
+    });
+  } finally {
+    config.APP_BASE_URL = previousBaseUrl;
+    config.TWILIO_TEAM_INVITE_CONTENT_SID = previousContentSid;
+  }
+});
+
+test("POST /api/v1/team/invites still sends SMS when WhatsApp fails", async () => {
+  const { config } = require("../../src/config");
+  const previousBaseUrl = config.APP_BASE_URL;
+  config.APP_BASE_URL = "https://app.schedurx.test";
+
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [{ id: "clinic-1", name: "Care Clinic", whatsappFrom: "+14155550100" }],
+    StaffInvite: [],
+  });
+  const twilioClient = createTwilioStub({ shouldFailWhatsApp: true });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, twilioClient });
+
+  try {
+    await withServer(app, async ({ request }) => {
+      const response = await request("/api/v1/team/invites", {
+        method: "POST",
+        headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Reception Test", phone: "8123451109", role: "receptionist" }),
+      });
+      const body = await readJson(response);
+
+      assert.equal(response.status, 201);
+      assert.equal(twilioClient.calls.sendWhatsApp.length, 1);
+      assert.equal(twilioClient.calls.sendSms.length, 1);
+      assert.equal(body.data.delivery.find((item) => item.channel === "whatsapp").status, "failed");
+      assert.equal(body.data.delivery.find((item) => item.channel === "sms").status, "queued");
+    });
+  } finally {
+    config.APP_BASE_URL = previousBaseUrl;
+  }
+});
+
+test("POST /api/v1/team/invites rejects an invalid phone before creating or sending an invite", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    StaffInvite: [],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/team/invites", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Bad Number", phone: "12345", role: "doctor" }),
+    });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 422);
+    assert.equal(body.error.code, "INVALID_PHONE");
+    assert.equal(supabaseClient._tables.StaffInvite.length, 0);
+    assert.equal(twilioClient.calls.sendWhatsApp.length, 0);
+    assert.equal(twilioClient.calls.sendSms.length, 0);
+  });
+});
+
 test("GET /api/v1/appointments scopes strictly to the authenticated staff member's clinicId", async () => {
   const firebaseAdminApp = createFirebaseAdminStub({
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
