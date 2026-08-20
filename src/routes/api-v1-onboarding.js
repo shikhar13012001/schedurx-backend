@@ -18,8 +18,32 @@ const { normalizeIndianMobile } = require("../lib/phone");
 const { PLANS, ADDONS, CREDIT_PACKS } = require("../lib/plans");
 const callForwardingLib = require("../lib/call-forwarding");
 
+const DOCTOR_PHOTOS_BUCKET = "doctor-photos";
+
 function createApiV1OnboardingRouter(supabaseClient) {
   const router = Router();
+
+  // Public bucket (see scripts/setup-doctor-photos-bucket.js) — unlike
+  // visits' Rx-attachment upload-url, this returns a stable public URL
+  // alongside the signed upload target, since a doctor photo is meant to be
+  // shown on their public ScheduRx page, not accessed via a short-lived
+  // signed read later.
+  router.post("/doctor-photo-upload-url", async (req, res) => {
+    if (!req.staff.doctorId) return fail(res, 422, "NOT_A_DOCTOR", "Only a doctor profile can have photos");
+    const { fileName, contentType } = req.body ?? {};
+    if (!fileName) return fail(res, 422, "MISSING_FIELDS", "fileName is required");
+    try {
+      const safeName = String(fileName).replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const path = `${req.staff.doctorId}/${Date.now()}-${safeName}`;
+      const { data, error } = await supabaseClient.storage.from(DOCTOR_PHOTOS_BUCKET).createSignedUploadUrl(path);
+      if (error) throw Object.assign(new Error(`creating signed upload URL: ${error.message}`), { code: "DATABASE_ERROR", statusCode: 500 });
+      const { data: pub } = supabaseClient.storage.from(DOCTOR_PHOTOS_BUCKET).getPublicUrl(path);
+      return ok(res, { path, uploadUrl: data.signedUrl, publicUrl: pub.publicUrl, contentType: contentType ?? null });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:onboarding] doctor photo upload-url failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
 
   // Hydrates the wizard on load/resume: clinic-level state + the caller's
   // own staff/doctor state, plus the static plan/call-forwarding catalogs so
