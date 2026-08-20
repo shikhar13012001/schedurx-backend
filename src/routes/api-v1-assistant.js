@@ -44,14 +44,19 @@ function systemPromptFor({ role, doctors, defaultDoctorId, timezone }) {
     defaultDoctor
       ? `The doctor currently in view is ${defaultDoctor.id} (Dr. ${defaultDoctor.fullName}) — use this id for tool calls unless the user names a different doctor from the list above.`
       : "No doctor is currently in view — ask which doctor if a tool needs one and it's ambiguous.",
-    "You can block calendar time, find the next open slot, look up a patient's visit history, and add a personal task/reminder for the staff member. Always use the matching tool for these — never claim to have done something without calling it.",
-    "add_task and block_time are independent — a task never blocks calendar time on its own. If the user's task is a real-world activity with a time (e.g. 'remind me to visit the bank at 3pm') and they ALSO ask you to reserve/block that time on their calendar, call both add_task and block_time for the same window. Don't call block_time for ordinary tasks (calls, follow-ups, admin) unless the user actually asked for the time to be blocked.",
-    "Keep replies short (1-3 sentences) and concrete: confirm exactly what you did, with the real time/date, or ask one brief clarifying question if something required is missing (e.g. how long to block, or which patient).",
+    "Your tools are elemental building blocks, not one-tool-per-phrasing — compose them to answer whatever's actually asked instead of waiting for an exact match:",
+    "- list_appointments: find appointments by doctor/date range/status. Use this first whenever a request refers to a set of existing appointments you don't already have ids for (\"my bookings today\", \"everything with Dr. X this week\", \"all tentative ones\").",
+    "- reschedule_appointments / cancel_appointments: act on one or many appointment ids at once (up to 20 per call) — the SAME tool whether the user means one appointment or fifty. For a bulk move, use shiftByDays/shiftByMinutes so each appointment keeps its own original time of day (\"move all of tomorrow's bookings to the day after\" = shiftByDays: 1) — only pass an absolute newStart when acting on exactly one appointment.",
+    "- find_next_free_slot / block_time: slot lookup and blocking calendar time, unchanged.",
+    "- find_patient_history: look up a patient's visit history by name.",
+    "- add_task: a personal to-do/reminder, independent of the calendar — add_task never blocks time on its own. If the task is a real-world activity with a time AND the user also asked to reserve that time, call add_task and block_time both, for the same window. Don't call block_time for ordinary tasks (calls, follow-ups, admin) unless blocking time was actually requested.",
+    "For a request touching more than one appointment (\"move my scheduled bookings to next day\", \"cancel everything with Dr. X on Friday\"), call list_appointments first to resolve which ones, then act on all matching ids in a single reschedule_appointments/cancel_appointments call — don't call the single-appointment path in a loop yourself. If the filter is ambiguous (which doctor, which day, which status) ask instead of guessing which appointments were meant. Never claim to have changed something without calling the matching tool.",
+    "Keep replies short (1-3 sentences) and concrete: confirm exactly what changed (how many appointments, old→new time) with the real values, not vague confirmations. If a bulk action partially failed, say which ones succeeded and which didn't rather than reporting only overall success.",
     "If a tool call fails, say plainly what went wrong instead of retrying silently more than once.",
   ].join("\n");
 }
 
-function createApiV1AssistantRouter({ supabaseClient, nettuClient, model, elevenLabsClient }) {
+function createApiV1AssistantRouter({ supabaseClient, nettuClient, twilioClient, model, elevenLabsClient }) {
   const router = Router();
 
   // POST /api/v1/assistant/speak — synthesizes one reply's text into speech.
@@ -92,6 +97,7 @@ function createApiV1AssistantRouter({ supabaseClient, nettuClient, model, eleven
       const tools = buildAssistantTools({
         supabaseClient,
         nettuClient,
+        twilioClient,
         clinicId: req.staff.clinicId,
         staffId: req.staff.staffId,
         timezone,
@@ -106,8 +112,10 @@ function createApiV1AssistantRouter({ supabaseClient, nettuClient, model, eleven
         tools,
         // Lets the model take a tool-call step and then continue with a plain-text
         // reply summarizing the result, instead of stopping right after the tool
-        // result (streamText's default with tools configured).
-        stopWhen: stepCountIs(5),
+        // result (streamText's default with tools configured). 6 (not 5) since
+        // the elemental tools encourage a list_appointments -> reschedule/cancel
+        // -> reply pattern for anything touching more than one appointment.
+        stopWhen: stepCountIs(6),
         // Re-chunks raw token deltas into whole-word chunks with a small,
         // even delay — without this, text can arrive in bursty, uneven
         // fragments that read as janky rather than a smooth typing effect.

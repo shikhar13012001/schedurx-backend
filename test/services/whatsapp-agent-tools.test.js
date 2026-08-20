@@ -64,6 +64,14 @@ function makeTables(extra = {}) {
         status: "booked",
       },
       {
+        id: "apt_mine_2",
+        clinicId: CLINIC_ID,
+        patientId: PATIENT_ID,
+        doctorId: "doc-1",
+        timeslot: futureIso(30),
+        status: "booked",
+      },
+      {
         id: "apt_someone_elses",
         clinicId: CLINIC_ID,
         patientId: OTHER_PATIENT_ID,
@@ -105,9 +113,16 @@ describe("get_my_appointments", () => {
   test("returns only the caller's own, non-cancelled upcoming appointments", async () => {
     const tools = makeTools(createTableStub(makeTables()));
     const result = await tools.get_my_appointments.execute({});
-    assert.equal(result.appointments.length, 1);
-    assert.equal(result.appointments[0].appointmentId, "apt_mine");
+    assert.equal(result.appointments.length, 2);
+    assert.deepEqual(result.appointments.map((a) => a.appointmentId).sort(), ["apt_mine", "apt_mine_2"]);
     assert.equal(result.appointments[0].doctorName, "Dr. Priya");
+  });
+
+  test("status filter returns the caller's cancelled appointment instead of the default upcoming set", async () => {
+    const tools = makeTools(createTableStub(makeTables()));
+    const result = await tools.get_my_appointments.execute({ status: "cancelled" });
+    assert.equal(result.appointments.length, 1);
+    assert.equal(result.appointments[0].appointmentId, "apt_mine_cancelled");
   });
 });
 
@@ -128,51 +143,87 @@ describe("ownership enforcement", () => {
     assert.match(result.error, /doesn't belong/);
   });
 
-  test("reschedule_my_appointment refuses an appointment belonging to a different patient", async () => {
+  test("reschedule_my_appointments refuses an appointment belonging to a different patient", async () => {
     const tools = makeTools(createTableStub(makeTables()));
-    const result = await tools.reschedule_my_appointment.execute({
-      appointmentId: "apt_someone_elses",
+    const result = await tools.reschedule_my_appointments.execute({
+      appointmentIds: ["apt_someone_elses"],
       date: "2026-08-25",
       time: "10:00",
     });
-    assert.equal(result.ok, false);
-    assert.match(result.error, /doesn't belong/);
+    assert.equal(result.succeeded, 0);
+    assert.equal(result.failed, 1);
+    assert.match(result.results[0].error, /doesn't belong/);
   });
 
-  test("cancel_my_appointment refuses an appointment belonging to a different patient", async () => {
+  test("cancel_my_appointments refuses an appointment belonging to a different patient", async () => {
     const tables = makeTables();
     const supabaseClient = createTableStub(tables);
     const tools = makeTools(supabaseClient);
-    const result = await tools.cancel_my_appointment.execute({ appointmentId: "apt_someone_elses" });
-    assert.equal(result.ok, false);
+    const result = await tools.cancel_my_appointments.execute({ appointmentIds: ["apt_someone_elses"] });
+    assert.equal(result.succeeded, 0);
     // Confirms the guard runs before any mutation — the other patient's
     // appointment must still be untouched.
     const { data: untouched } = await supabaseClient.from("Appointment").eq("id", "apt_someone_elses").maybeSingle();
     assert.equal(untouched.status, "booked");
   });
 
-  test("cancel_my_appointment refuses an appointment from a different clinic even with a matching patientId", async () => {
+  test("cancel_my_appointments refuses an appointment from a different clinic even with a matching patientId", async () => {
     const tables = makeTables({
       Appointment: [
         { id: "apt_cross_clinic", clinicId: "some-other-clinic", patientId: PATIENT_ID, doctorId: "doc-1", timeslot: futureIso(24), status: "booked" },
       ],
     });
     const tools = makeTools(createTableStub(tables));
-    const result = await tools.cancel_my_appointment.execute({ appointmentId: "apt_cross_clinic" });
-    assert.equal(result.ok, false);
+    const result = await tools.cancel_my_appointments.execute({ appointmentIds: ["apt_cross_clinic"] });
+    assert.equal(result.succeeded, 0);
+  });
+
+  test("a bulk call with a mix of owned and not-owned ids cancels only the owned one, reporting both outcomes", async () => {
+    const supabaseClient = createTableStub(makeTables());
+    const tools = makeTools(supabaseClient, { nettuClient: makeNettuStub() });
+    const result = await tools.cancel_my_appointments.execute({ appointmentIds: ["apt_mine", "apt_someone_elses"] });
+    assert.equal(result.succeeded, 1);
+    assert.equal(result.failed, 1);
+    const mine = result.results.find((r) => r.appointmentId === "apt_mine");
+    const theirs = result.results.find((r) => r.appointmentId === "apt_someone_elses");
+    assert.equal(mine.ok, true);
+    assert.equal(theirs.ok, false);
+    const { data: theirsRow } = await supabaseClient.from("Appointment").eq("id", "apt_someone_elses").maybeSingle();
+    assert.equal(theirsRow.status, "booked", "the not-owned appointment must be untouched");
+    const { data: mineRow } = await supabaseClient.from("Appointment").eq("id", "apt_mine").maybeSingle();
+    assert.equal(mineRow.status, "cancelled");
   });
 });
 
-describe("reschedule_my_appointment", () => {
-  test("reschedules the caller's own appointment to a new time", async () => {
+describe("reschedule_my_appointments", () => {
+  test("reschedules the caller's own appointment to a new time (single id)", async () => {
     const supabaseClient = createTableStub(makeTables());
     const tools = makeTools(supabaseClient, { nettuClient: makeNettuStub() });
     const future = new Date(Date.now() + 50 * 60 * 60 * 1000);
     const date = future.toISOString().slice(0, 10);
-    const result = await tools.reschedule_my_appointment.execute({ appointmentId: "apt_mine", date, time: "11:00" });
-    assert.equal(result.ok, true, JSON.stringify(result));
+    const result = await tools.reschedule_my_appointments.execute({ appointmentIds: ["apt_mine"], date, time: "11:00" });
+    assert.equal(result.succeeded, 1, JSON.stringify(result));
     const { data: updated } = await supabaseClient.from("Appointment").eq("id", "apt_mine").maybeSingle();
     assert.equal(updated.status, "booked");
+  });
+
+  test("bulk-reschedules multiple owned appointments with shiftByDays, each keeping its own time of day", async () => {
+    const supabaseClient = createTableStub(makeTables());
+    const tools = makeTools(supabaseClient, { nettuClient: makeNettuStub() });
+    const result = await tools.reschedule_my_appointments.execute({ appointmentIds: ["apt_mine", "apt_mine_2"], shiftByDays: 1 });
+    assert.equal(result.succeeded, 2, JSON.stringify(result));
+    assert.equal(result.failed, 0);
+  });
+
+  test("rejects date/time when more than one appointmentId is given", async () => {
+    const tools = makeTools(createTableStub(makeTables()), { nettuClient: makeNettuStub() });
+    const result = await tools.reschedule_my_appointments.execute({
+      appointmentIds: ["apt_mine", "apt_mine_2"],
+      date: "2026-08-25",
+      time: "10:00",
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /only apply to a single/);
   });
 });
 

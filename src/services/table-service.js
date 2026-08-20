@@ -108,11 +108,21 @@ async function updatePatientFields(supabase, patientId, patch) {
 
 // ─── Appointments (REST read layer) ────────────────────────────────────────────
 
-async function listAppointmentsForClinic(supabase, clinicId, { date, doctorId } = {}) {
+// date is kept as the original single-day shorthand (still used by the
+// dashboard's calendar view); dateFrom/dateTo is the more elemental range
+// form the assistant's list_appointments tool needs so one query can answer
+// "today", "this week", or "everything from here on" alike. status filters
+// to one Appointment.status value (booked/tentative/cancelled/completed/
+// no_show/blocked) — omitted means no status filtering at all.
+async function listAppointmentsForClinic(supabase, clinicId, { date, dateFrom, dateTo, doctorId, status } = {}) {
   let query = supabase.from("Appointment").select("*").eq("clinicId", clinicId);
   if (doctorId) query = query.eq("doctorId", doctorId);
+  if (status) query = query.eq("status", status);
   if (date) {
     query = query.gte("timeslot", `${date}T00:00:00`).lt("timeslot", `${date}T23:59:59.999`);
+  } else {
+    if (dateFrom) query = query.gte("timeslot", `${dateFrom}T00:00:00`);
+    if (dateTo) query = query.lt("timeslot", `${dateTo}T23:59:59.999`);
   }
   const { data, error } = await query.order("timeslot", { ascending: true });
   if (error) throw dbErr(`listing appointments: ${error.message}`);
@@ -121,16 +131,19 @@ async function listAppointmentsForClinic(supabase, clinicId, { date, doctorId } 
 
 // Used by the WhatsApp patient agent (whatsapp-agent-tools.js) to answer "what
 // are my appointments" without exposing a general by-patient search — the
-// caller is always the phone-verified patient themselves.
-async function listUpcomingAppointmentsForPatient(supabase, clinicId, patientId) {
-  const { data, error } = await supabase
-    .from("Appointment")
-    .select("*")
-    .eq("clinicId", clinicId)
-    .eq("patientId", patientId)
-    .neq("status", "cancelled")
-    .gte("timeslot", new Date().toISOString())
-    .order("timeslot", { ascending: true });
+// caller is always the phone-verified patient themselves. No filter args
+// (the default) preserves the original "upcoming, not cancelled" behavior;
+// passing status/dateFrom/dateTo replaces those defaults rather than
+// narrowing them further, so a patient can also ask about past or
+// cancelled visits through the same tool.
+async function listUpcomingAppointmentsForPatient(supabase, clinicId, patientId, { status, dateFrom, dateTo } = {}) {
+  let query = supabase.from("Appointment").select("*").eq("clinicId", clinicId).eq("patientId", patientId);
+  if (status) query = query.eq("status", status);
+  else query = query.neq("status", "cancelled");
+  if (dateFrom) query = query.gte("timeslot", dateFrom);
+  else if (!dateTo) query = query.gte("timeslot", new Date().toISOString());
+  if (dateTo) query = query.lt("timeslot", dateTo);
+  const { data, error } = await query.order("timeslot", { ascending: true });
   if (error) throw dbErr(`listing upcoming appointments: ${error.message}`);
   return normalizeAppointments(data);
 }

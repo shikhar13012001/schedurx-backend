@@ -595,4 +595,106 @@ async function cancelAppointment(nettuClient, supabaseClient, opts, log, twilioC
   };
 }
 
-module.exports = { bookAppointment, rescheduleAppointment, cancelAppointment };
+// ─── Bulk reschedule / cancel ───────────────────────────────────────────────
+// Thin sequential wrappers over the single-record functions above — every
+// cutoff check, nettu call, and comms trigger they already do runs exactly
+// as it would one at a time, just looped. Sequential (not Promise.all) on
+// purpose: keeps nettu-scheduler calls from racing each other and keeps one
+// item's failure from being ambiguous about which one it was. Capped so a
+// single tool call can't accidentally sweep up hundreds of records — the
+// caller (an assistant tool) should narrow its own filter instead.
+const MAX_BULK_APPOINTMENTS = 20;
+
+function summarizeBulkResults(results) {
+  return { results, succeeded: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length };
+}
+
+// opts: { clinicId, appointmentIds: string[], newStart?, shiftByDays?, shiftByMinutes?, reason?, source? }
+// newStart (an absolute new time) only makes sense for exactly one
+// appointment — for more than one, every appointment keeps its own original
+// time-of-day and only shifts by shiftByDays/shiftByMinutes (e.g. "move all
+// my bookings to tomorrow" preserves each one's own hour).
+async function rescheduleAppointments(nettuClient, supabaseClient, opts, log, twilioClient) {
+  const { clinicId, appointmentIds, newStart, shiftByDays, shiftByMinutes, reason, source = "system" } = opts;
+  if (!Array.isArray(appointmentIds) || appointmentIds.length === 0) {
+    throw Object.assign(new Error("appointmentIds must be a non-empty array"), { code: "MISSING_FIELDS", statusCode: 422 });
+  }
+  if (appointmentIds.length > MAX_BULK_APPOINTMENTS) {
+    throw Object.assign(new Error(`Can't act on more than ${MAX_BULK_APPOINTMENTS} appointments in one request`), {
+      code: "TOO_MANY_APPOINTMENTS",
+      statusCode: 422,
+    });
+  }
+  if (appointmentIds.length > 1 && newStart) {
+    throw Object.assign(new Error("newStart only applies to a single appointment — use shiftByDays/shiftByMinutes for more than one"), {
+      code: "INVALID_BULK_RESCHEDULE",
+      statusCode: 422,
+    });
+  }
+  const shiftMs = (shiftByDays ?? 0) * 24 * 60 * 60 * 1000 + (shiftByMinutes ?? 0) * 60 * 1000;
+  if (!newStart && shiftMs === 0) {
+    throw Object.assign(new Error("Provide either newStart or a non-zero shiftByDays/shiftByMinutes"), {
+      code: "MISSING_FIELDS",
+      statusCode: 422,
+    });
+  }
+
+  const results = [];
+  for (const appointmentId of appointmentIds) {
+    try {
+      const { data: appt, error } = await supabaseClient
+        .from("Appointment")
+        .select("doctorId, timeslot")
+        .eq("id", appointmentId)
+        .eq("clinicId", clinicId)
+        .maybeSingle();
+      if (error) throw Object.assign(new Error(`DB error: ${error.message}`), { code: "DATABASE_ERROR" });
+      if (!appt) throw Object.assign(new Error(`Appointment '${appointmentId}' not found`), { code: "APPOINTMENT_NOT_FOUND" });
+
+      let computedNewStart = newStart;
+      if (!computedNewStart) {
+        if (!appt.timeslot) throw Object.assign(new Error("No original time to shift from"), { code: "INVALID_BULK_RESCHEDULE" });
+        computedNewStart = new Date(new Date(appt.timeslot).getTime() + shiftMs).toISOString();
+      }
+
+      const result = await rescheduleAppointment(
+        nettuClient,
+        supabaseClient,
+        { appointmentId, clinicId, doctorId: appt.doctorId, newStart: computedNewStart, reason, source },
+        log,
+        twilioClient,
+      );
+      results.push({ appointmentId, ok: true, ...result });
+    } catch (err) {
+      results.push({ appointmentId, ok: false, error: err.message, code: err.code ?? null });
+    }
+  }
+  return summarizeBulkResults(results);
+}
+
+// opts: { clinicId, appointmentIds: string[], reason?, source? }
+async function cancelAppointments(nettuClient, supabaseClient, opts, log, twilioClient) {
+  const { clinicId, appointmentIds, reason, source = "system" } = opts;
+  if (!Array.isArray(appointmentIds) || appointmentIds.length === 0) {
+    throw Object.assign(new Error("appointmentIds must be a non-empty array"), { code: "MISSING_FIELDS", statusCode: 422 });
+  }
+  if (appointmentIds.length > MAX_BULK_APPOINTMENTS) {
+    throw Object.assign(new Error(`Can't act on more than ${MAX_BULK_APPOINTMENTS} appointments in one request`), {
+      code: "TOO_MANY_APPOINTMENTS",
+      statusCode: 422,
+    });
+  }
+
+  const results = [];
+  for (const appointmentId of appointmentIds) {
+    try {
+      const result = await cancelAppointment(nettuClient, supabaseClient, { appointmentId, clinicId, reason, source }, log, twilioClient);
+      results.push({ appointmentId, ok: true, ...result });
+    } catch (err) {
+      results.push({ appointmentId, ok: false, error: err.message, code: err.code ?? null });
+    }
+  }
+  return summarizeBulkResults(results);
+}
+
+module.exports = { bookAppointment, rescheduleAppointment, cancelAppointment, rescheduleAppointments, cancelAppointments };

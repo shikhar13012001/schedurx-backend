@@ -13,8 +13,107 @@ const tableSvc = require("./table-service");
 const visitSvc = require("./visit-service");
 const taskSvc = require("./task-service");
 
-function buildAssistantTools({ supabaseClient, nettuClient, clinicId, staffId, timezone, reminderDoctor, log }) {
+const APPOINTMENT_STATUSES = ["booked", "tentative", "cancelled", "completed", "no_show", "blocked"];
+
+function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinicId, staffId, timezone, reminderDoctor, log }) {
   return {
+    list_appointments: tool({
+      description:
+        "Find appointments by doctor, date range, and/or status. The elemental read tool for anything that refers to a set of existing appointments — call this first whenever you don't already have the specific appointment id(s) you need, before reschedule_appointments/cancel_appointments.",
+      inputSchema: z.object({
+        doctorId: z.string().optional().describe("Restrict to one doctor. Omit to include every doctor at the clinic."),
+        date: z.string().optional().describe("Restrict to exactly one local calendar day, as YYYY-MM-DD."),
+        dateFrom: z.string().optional().describe("Local calendar date range start (YYYY-MM-DD), inclusive. Ignored if 'date' is set."),
+        dateTo: z.string().optional().describe("Local calendar date range end (YYYY-MM-DD), exclusive. Ignored if 'date' is set."),
+        status: z.enum(APPOINTMENT_STATUSES).optional().describe("Restrict to one status. Omit to include every status."),
+      }),
+      execute: async ({ doctorId, date, dateFrom, dateTo, status }) => {
+        let appointments;
+        try {
+          appointments = await tableSvc.listAppointmentsForClinic(supabaseClient, clinicId, { doctorId, date, dateFrom, dateTo, status });
+        } catch (err) {
+          return { count: 0, appointments: [], error: err.message };
+        }
+        // listAppointmentsForClinic doesn't join Patient (the calendar UI
+        // that also calls it fetches patients separately) — batch-fetch
+        // names just for the ids this call actually returned, rather than
+        // changing that shared function's shape. A failure here (e.g. a
+        // transient Patient lookup error) shouldn't blank out appointments
+        // that were already fetched successfully — fall back to null names.
+        const patientIds = [...new Set(appointments.map((a) => a.patientId).filter(Boolean))];
+        const namesById = new Map();
+        if (patientIds.length) {
+          try {
+            const { data: patients } = await supabaseClient.from("Patient").select("id, fullName").in("id", patientIds);
+            for (const p of patients ?? []) namesById.set(p.id, p.fullName);
+          } catch {
+            // names stay null below — appointments are still returned
+          }
+        }
+        return {
+          count: appointments.length,
+          appointments: appointments.map((a) => ({
+            id: a.id,
+            doctorId: a.doctorId,
+            patientName: a.patientId ? (namesById.get(a.patientId) ?? null) : null,
+            start: a.timeslot,
+            status: a.status,
+          })),
+        };
+      },
+    }),
+
+    reschedule_appointments: tool({
+      description:
+        "Reschedule one or many appointments (up to 20) in a single call — the same tool whether the user means one appointment or many. For more than one, use shiftByDays/shiftByMinutes so each appointment keeps its own original time of day; only pass newStart (an absolute new time) when acting on exactly one appointment id.",
+      inputSchema: z.object({
+        appointmentIds: z.array(z.string()).min(1).describe("Ids of the appointments to reschedule — from a prior list_appointments call."),
+        newStart: z
+          .string()
+          .optional()
+          .describe("Absolute new start time as a full ISO 8601 datetime with offset. Only valid when appointmentIds has exactly one id."),
+        shiftByDays: z.number().int().optional().describe("Shift each appointment's own original time by this many days (can be negative)."),
+        shiftByMinutes: z.number().int().optional().describe("Shift each appointment's own original time by this many minutes (can be negative)."),
+        reason: z.string().optional(),
+      }),
+      execute: async ({ appointmentIds, newStart, shiftByDays, shiftByMinutes, reason }) => {
+        try {
+          const result = await appointmentSvc.rescheduleAppointments(
+            nettuClient,
+            supabaseClient,
+            { clinicId, appointmentIds, newStart, shiftByDays, shiftByMinutes, reason, source: "assistant" },
+            log,
+            twilioClient,
+          );
+          return result;
+        } catch (err) {
+          return { succeeded: 0, failed: appointmentIds.length, results: [], error: err.message };
+        }
+      },
+    }),
+
+    cancel_appointments: tool({
+      description: "Cancel one or many appointments (up to 20) in a single call — the same tool whether the user means one appointment or many.",
+      inputSchema: z.object({
+        appointmentIds: z.array(z.string()).min(1).describe("Ids of the appointments to cancel — from a prior list_appointments call."),
+        reason: z.string().optional(),
+      }),
+      execute: async ({ appointmentIds, reason }) => {
+        try {
+          const result = await appointmentSvc.cancelAppointments(
+            nettuClient,
+            supabaseClient,
+            { clinicId, appointmentIds, reason, source: "assistant" },
+            log,
+            twilioClient,
+          );
+          return result;
+        } catch (err) {
+          return { succeeded: 0, failed: appointmentIds.length, results: [], error: err.message };
+        }
+      },
+    }),
+
     block_time: tool({
       description:
         "Block a window on a doctor's calendar so no new appointments can land in it. Use when the staff member wants to mark a doctor (themselves or someone named) unavailable.",

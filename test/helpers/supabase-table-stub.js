@@ -12,6 +12,7 @@ function matches(row, filters) {
     if (op === "gte") return row[col] >= val;
     if (op === "lt") return row[col] < val;
     if (op === "is" && val === null) return row[col] == null;
+    if (op === "in") return Array.isArray(val) && val.includes(row[col]);
     if (op === "or") return matchesOr(row, val);
     return true;
   });
@@ -61,6 +62,10 @@ function createTableStub(initialTables = {}) {
       },
       neq(col, val) {
         filters.push(["neq", col, val]);
+        return this;
+      },
+      in(col, vals) {
+        filters.push(["in", col, vals]);
         return this;
       },
       gte(col, val) {

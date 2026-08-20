@@ -79,7 +79,7 @@ function createApiV1Router({
   // wrapper (@ai-sdk/openai), not the raw `openai` client, so tests can
   // inject a mock LanguageModel the same way other subsystems inject stubs.
   if (assistantModel) {
-    router.use("/assistant", createApiV1AssistantRouter({ supabaseClient, nettuClient, model: assistantModel, elevenLabsClient }));
+    router.use("/assistant", createApiV1AssistantRouter({ supabaseClient, nettuClient, twilioClient, model: assistantModel, elevenLabsClient }));
   }
 
   return router;
