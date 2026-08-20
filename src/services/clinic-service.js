@@ -7,6 +7,58 @@ const { validatePlanSelection, estimateMonthlyPaise, PRICE_CONFIG_VERSION } = re
 // Defaults for the dashboard's feature-toggle settings blob — mirrors the
 // frontend's seed() defaults in src/stores/index.ts so a freshly onboarded
 // clinic behaves the same as the mock demo did.
+//
+// communication.workflows used to default to [] deliberately, on the theory
+// that a clinic should opt in before anything gets sent. In practice that
+// meant every newly onboarded clinic sent nothing at all — no booking
+// confirmation, no reminder — until someone manually found Automations and
+// configured it, which nobody does on day one. These 5 defaults are the
+// same ones already live and Meta-approved on poc-clinic-001 (see
+// PRODUCTION_CHECKLIST.md's message-template work): SMS + an approved
+// WhatsApp Content Template for booking/reschedule/cancellation (dual-send,
+// since the WhatsApp template has no session-window restriction but a
+// brand-new patient contact often does), a 24h WhatsApp reminder, and a
+// dual-channel missed-call follow-up. Editable/removable from Automations
+// like anything else — this only changes what a clinic starts with.
+const DEFAULT_COMMUNICATION_WORKFLOWS = [
+  {
+    id: "booking-conf-sms", channel: "sms", enabled: true, trigger: "booking_confirmed", offsetMinutes: 0,
+    template: "Hi {{patientName}}, your appointment with {{doctorName}} at {{clinicName}} is confirmed for {{apptTime}}. Manage it here: {{bookingUrl}}",
+  },
+  {
+    id: "booking-conf-wa-approved", channel: "whatsapp", enabled: true, trigger: "booking_confirmed", offsetMinutes: 0,
+    template: "", contentSid: "HX1841dbafde6ac7260142047396f91479", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+  },
+  {
+    id: "reschedule-sms", channel: "sms", enabled: true, trigger: "reschedule", offsetMinutes: 0,
+    template: "Hi {{patientName}}, your appointment with {{doctorName}} at {{clinicName}} is confirmed for {{apptTime}}. Manage it here: {{bookingUrl}}",
+  },
+  {
+    id: "reschedule-wa-approved", channel: "whatsapp", enabled: true, trigger: "reschedule", offsetMinutes: 0,
+    template: "", contentSid: "HXb43e57b9457e67c349faebc6aeddf97d", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+  },
+  {
+    id: "cancel-sms", channel: "sms", enabled: true, trigger: "cancellation", offsetMinutes: 0,
+    template: "Hi {{patientName}}, your appointment with {{doctorName}} at {{clinicName}} on {{apptTime}} has been cancelled.",
+  },
+  {
+    id: "cancel-wa-approved", channel: "whatsapp", enabled: true, trigger: "cancellation", offsetMinutes: 0,
+    template: "", contentSid: "HX46afd43a893b38d7955f7c56d4eef7da", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+  },
+  {
+    id: "reminder-24h-wa", channel: "whatsapp", enabled: true, trigger: "reminder", offsetMinutes: -1440,
+    template: "", contentSid: "HXf5ad76046a6a799a43cdaf36b657f015", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+  },
+  {
+    id: "missed-call-wa", channel: "whatsapp", enabled: true, trigger: "missed_call_followup", offsetMinutes: 0,
+    template: "Sorry we missed your call at {{clinicName}}! Book an appointment here: {{bookingUrl}}, or call us back at {{clinicPhone}}.",
+  },
+  {
+    id: "missed-call-sms", channel: "sms", enabled: true, trigger: "missed_call_followup", offsetMinutes: 0,
+    template: "Sorry we missed your call at {{clinicName}}! Book an appointment here: {{bookingUrl}}, or call us back at {{clinicPhone}}.",
+  },
+];
+
 const DEFAULT_SETTINGS = {
   captureMode: "recap",
   receptionAnalytics: false,
@@ -15,10 +67,11 @@ const DEFAULT_SETTINGS = {
   digitalRx: true,
   autoFollowUp: true,
   viewMode: "simple",
-  // No channels/workflows configured by default — a freshly onboarded clinic
-  // sends nothing until it opts in via PATCH /api/v1/clinic-settings. See
-  // comms-workflow-service.js for the shape workflows[] entries take.
-  communication: { channelsEnabled: [], voiceGreetingTemplate: null, workflows: [] },
+  communication: {
+    channelsEnabled: ["sms", "whatsapp"],
+    voiceGreetingTemplate: null,
+    workflows: DEFAULT_COMMUNICATION_WORKFLOWS,
+  },
 };
 
 const DEFAULT_RULES = {
