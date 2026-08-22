@@ -24,6 +24,14 @@ function dbErr(msg) {
   return Object.assign(new Error(`DB error ${msg}`), { code: "DATABASE_ERROR", statusCode: 500 });
 }
 
+// StaffInvite.token is stored hashed, not plaintext — a DB read (leaked
+// backup, over-broad export) shouldn't hand over usable access to every
+// pending invite. The raw token is still what's ever emailed/texted/put in
+// a URL; this is only how it's compared against what's stored.
+function hashToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
 // Solo-practice rule: at most one active doctor per clinic, ever — enforced
 // here (invite creation) rather than only at accept-time, so the inviter
 // gets an immediate, honest error instead of generating a link that will
@@ -62,7 +70,7 @@ async function createInvite(supabaseClient, { clinicId, invitedByStaffId, name, 
       phone,
       role,
       doctorId: doctorId ?? null,
-      token,
+      token: hashToken(token),
       shortCode,
       status: "pending",
       createdAt: now.toISOString(),
@@ -71,7 +79,10 @@ async function createInvite(supabaseClient, { clinicId, invitedByStaffId, name, 
     .select()
     .single();
   if (error) throw dbErr(`creating invite: ${error.message}`);
-  return data;
+  // The raw token exists only right here — it's never recoverable from the
+  // stored hash again, same as a password. The caller needs it once, to put
+  // in the invite link it's about to send.
+  return { ...data, token };
 }
 
 function assertRedeemable(data) {
@@ -88,10 +99,29 @@ function assertRedeemable(data) {
   return data;
 }
 
-async function getInviteByToken(supabaseClient, token) {
-  const { data, error } = await supabaseClient.from("StaffInvite").select("*").eq("token", token).maybeSingle();
-  if (error) throw dbErr(`fetching invite: ${error.message}`);
-  return assertRedeemable(data);
+// `credential` is normally the raw token from an invite link. The
+// short-code lookup flow (getInviteByShortCode below) can't hand back
+// something that resolves via this same path anymore now that token is
+// hashed — a hash isn't reversible, so there's no raw value left to return.
+// It hands back the invite's own id instead (a random UUID, similar
+// unguessable strength to the token, and reaching that response already
+// required guessing the correct short code — same gate the raw token sat
+// behind before). Matching on `id` too here means the frontend's existing
+// accept-by-token call site keeps working unchanged for that path.
+async function getInviteByToken(supabaseClient, credential) {
+  // Two separate .eq() lookups, not one .or("token.eq.X,id.eq.Y") — that
+  // string gets parsed as a PostgREST filter expression, so interpolating
+  // unsanitized user input into it directly would let a crafted credential
+  // (commas, dots, operator syntax) manipulate the filter itself.
+  const { data: byToken, error: tokenErr } = await supabaseClient
+    .from("StaffInvite").select("*").eq("token", hashToken(credential)).maybeSingle();
+  if (tokenErr) throw dbErr(`fetching invite: ${tokenErr.message}`);
+  if (byToken) return assertRedeemable(byToken);
+
+  const { data: byId, error: idErr } = await supabaseClient
+    .from("StaffInvite").select("*").eq("id", credential).maybeSingle();
+  if (idErr) throw dbErr(`fetching invite: ${idErr.message}`);
+  return assertRedeemable(byId);
 }
 
 // Resolves the short, human-typeable code (e.g. "DR7KQ9") to the same invite
@@ -163,4 +193,4 @@ async function acceptInvite(supabaseClient, firebaseAdminApp, token, { firebaseU
   return { ...staff, doctorId, onboardingCompleted: false, onboardingStep: "you" };
 }
 
-module.exports = { createInvite, getInviteByToken, getInviteByShortCode, acceptInvite };
+module.exports = { createInvite, getInviteByToken, getInviteByShortCode, acceptInvite, hashToken };

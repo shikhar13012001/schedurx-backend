@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const staffInviteSvc = require("../../src/services/staff-invite-service");
 const { createTableStub } = require("../helpers/supabase-table-stub");
+const { hashToken } = staffInviteSvc;
 
 function makeFirebaseAdminStub() {
   const calls = [];
@@ -29,6 +30,20 @@ describe("createInvite", () => {
     assert.ok(new Date(invite.expiresAt).getTime() > Date.now());
   });
 
+  test("stores the token hashed, not in plaintext — the caller still gets the raw one back once", async () => {
+    const supabaseClient = createTableStub({});
+    const invite = await staffInviteSvc.createInvite(supabaseClient, {
+      clinicId: "clinic-1", phone: "+919999999999", role: "receptionist",
+    });
+    const stored = supabaseClient._tables.StaffInvite.find((r) => r.id === invite.id);
+    assert.notEqual(stored.token, invite.token, "the stored row should hold a hash, not the raw token returned to the caller");
+    assert.equal(stored.token, hashToken(invite.token));
+    // And the hash actually resolves via the normal lookup path — proves
+    // the returned raw token is the real, usable credential.
+    const resolved = await staffInviteSvc.getInviteByToken(supabaseClient, invite.token);
+    assert.equal(resolved.id, invite.id);
+  });
+
   test("rejects an invalid role", async () => {
     const supabaseClient = createTableStub({});
     await assert.rejects(
@@ -45,7 +60,7 @@ describe("getInviteByToken", () => {
       StaffInvite: [
         {
           id: "invite-1",
-          token: "tok1",
+          token: hashToken("tok1"),
           status: "accepted",
           clinicId: "clinic-1",
           phone: "+919999999999",
@@ -61,7 +76,7 @@ describe("getInviteByToken", () => {
       StaffInvite: [
         {
           id: "invite-1",
-          token: "tok1",
+          token: hashToken("tok1"),
           status: "pending",
           clinicId: "clinic-1",
           phone: "+919999999999",
@@ -76,6 +91,17 @@ describe("getInviteByToken", () => {
   test("rejects an unknown token", async () => {
     const supabaseClient = createTableStub({ StaffInvite: [] });
     await assert.rejects(() => staffInviteSvc.getInviteByToken(supabaseClient, "nope"), /not found/i);
+  });
+
+  // The short-code lookup flow (getInviteByShortCode) hands back the
+  // invite's own id in place of the now-hashed token — this is what makes
+  // that substitution actually work end to end.
+  test("also resolves by the invite's raw id, not just its hashed token", async () => {
+    const supabaseClient = createTableStub({
+      StaffInvite: [{ id: "invite-by-id-1", token: hashToken("tok-unrelated"), status: "pending", clinicId: "clinic-1", phone: "+919999999999", role: "doctor", expiresAt: new Date(Date.now() + 60_000).toISOString() }],
+    });
+    const resolved = await staffInviteSvc.getInviteByToken(supabaseClient, "invite-by-id-1");
+    assert.equal(resolved.id, "invite-by-id-1");
   });
 });
 
@@ -134,7 +160,7 @@ describe("acceptInvite", () => {
       StaffInvite: [
         {
           id: "invite-1",
-          token: "tok1",
+          token: hashToken("tok1"),
           status: "pending",
           clinicId: "clinic-1",
           doctorId: null,
@@ -171,7 +197,7 @@ describe("acceptInvite", () => {
       StaffInvite: [
         {
           id: "invite-1",
-          token: "tok-doc",
+          token: hashToken("tok-doc"),
           status: "pending",
           clinicId: "clinic-1",
           doctorId: null,
@@ -207,7 +233,7 @@ describe("acceptInvite", () => {
       StaffInvite: [
         {
           id: "invite-2",
-          token: "tok-preassigned",
+          token: hashToken("tok-preassigned"),
           status: "pending",
           clinicId: "clinic-1",
           doctorId: "doc-existing",
@@ -233,7 +259,7 @@ describe("acceptInvite", () => {
       StaffInvite: [
         {
           id: "invite-1",
-          token: "tok1",
+          token: hashToken("tok1"),
           status: "pending",
           clinicId: "clinic-1",
           name: "Anita",

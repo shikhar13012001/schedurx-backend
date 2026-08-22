@@ -61,6 +61,26 @@ async function getStaffById(supabaseClient, staffId) {
   return data ?? null;
 }
 
+// Revokes access immediately — firebase-auth.js's middleware rejects every
+// subsequent request for this staffId regardless of how long their existing
+// Firebase ID token would otherwise stay valid/refreshable. Doesn't touch
+// Firebase itself (no token/session invalidation there), so a token already
+// in memory client-side keeps failing at this app-layer check rather than
+// working until it happens to expire — same effective outcome, no Firebase
+// Admin session-revocation API call needed.
+async function deactivateStaff(supabaseClient, clinicId, staffId) {
+  const { data, error } = await supabaseClient
+    .from("Staff")
+    .update({ isActive: false })
+    .eq("id", staffId)
+    .eq("clinicId", clinicId)
+    .select()
+    .maybeSingle();
+  if (error) throw dbErr(`deactivating staff: ${error.message}`);
+  if (!data) throw Object.assign(new Error("Staff not found in this clinic"), { code: "STAFF_NOT_FOUND", statusCode: 404 });
+  return data;
+}
+
 // ─── Onboarding (personal profile — screen 3, receptionist branch, and the
 // personal-hours section shared by both roles) ─────────────────────────────
 
@@ -112,6 +132,7 @@ module.exports = {
   getStaffById,
   listStaffForClinic,
   createStaff,
+  deactivateStaff,
   updateStaffOnboardingProfile,
   advanceStaffOnboardingStep,
   completeStaffOnboarding,

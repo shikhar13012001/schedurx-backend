@@ -49,6 +49,14 @@ function firebaseAuth(firebaseAdminApp, supabaseClient) {
     if (!staffRow) {
       return fail(res, 403, "STAFF_NOT_ONBOARDED", "No Staff record found for this account");
     }
+    // A deactivated staff member's Firebase ID token stays valid (and
+    // silently refreshable) up to its own expiry regardless of Staff.isActive
+    // — deactivation has to be enforced here, on every request, not just by
+    // custom claims set once at onboarding, or "removed" staff keep working
+    // until their token happens to expire.
+    if (staffRow.isActive === false) {
+      return fail(res, 403, "STAFF_DEACTIVATED", "This account no longer has access — contact your clinic owner");
+    }
 
     req.staff = {
       uid: decoded.uid,

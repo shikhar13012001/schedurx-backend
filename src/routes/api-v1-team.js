@@ -94,6 +94,23 @@ function createApiV1TeamRouter(supabaseClient, twilioClient) {
     }
   });
 
+  // PATCH /api/v1/team/:staffId/deactivate — revokes a staff member's
+  // access immediately (see staff-service.js's deactivateStaff / firebase-
+  // auth.js's isActive check). Owner-only, and an owner can't deactivate
+  // themselves — that'd lock the clinic out with no one left who can undo it.
+  router.patch("/:staffId/deactivate", requireRole("owner"), async (req, res) => {
+    if (req.params.staffId === req.staff.staffId) {
+      return fail(res, 422, "CANNOT_DEACTIVATE_SELF", "You can't deactivate your own account");
+    }
+    try {
+      const staff = await staffSvc.deactivateStaff(supabaseClient, req.staff.clinicId, req.params.staffId);
+      return ok(res, { staff });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:team] deactivate failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
   return router;
 }
 
