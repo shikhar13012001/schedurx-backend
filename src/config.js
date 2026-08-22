@@ -102,18 +102,29 @@ const schema = z.object({
   // to use a cloned/custom voice instead.
   ELEVENLABS_VOICE_ID: z.string().default("21m00Tcm4TlvDq8ikWAM"),
 
-  // The dashboard/patient-facing frontend's public origin (no trailing
-  // slash), e.g. "https://app.schedurx.in" — used to turn tool-helpers.js's
-  // relative formUrl() ("/clinicId/appointmentId") into a real link patients
-  // can tap from a booking-confirmation SMS/WhatsApp message. Left unset,
-  // those messages just omit the link rather than send a broken relative path.
-  APP_BASE_URL: z.string().optional(),
+  // The patient booking app's public origin (no trailing slash), e.g.
+  // "https://book.schedurx.com" — used to turn tool-helpers.js's relative
+  // formUrl() ("/clinicId/appointmentId") into a real link patients can tap
+  // from a booking-confirmation SMS/WhatsApp message. Left unset, those
+  // messages just omit the link rather than send a broken relative path.
+  //
+  // Was a single overloaded APP_BASE_URL until this split — it was also
+  // being used for team-invite links (api-v1-team.js), which need the
+  // *dashboard's* URL instead. A staff invite pointed at the patient app
+  // has no matching route there, so every invite link was silently broken.
+  PATIENT_APP_BASE_URL: z.string().optional(),
+
+  // The staff dashboard's public origin, e.g. "https://app.schedurx.com" —
+  // used to build team-invite links (api-v1-team.js). Separate from
+  // CORS_ALLOWED_ORIGIN (which can list more than one dev/prod origin) since
+  // an invite link needs exactly one canonical URL to send.
+  DASHBOARD_BASE_URL: z.string().optional(),
 
   // ── Public patient-facing API CORS (/api/v1/public/*) — separate allowlist
   // from CORS_ALLOWED_ORIGIN since that one gates the staff dashboard only.
-  // Comma-separated, same format. APP_BASE_URL (the patient frontend's own
-  // origin) is always allowed in addition to whatever's listed here, so this
-  // is normally only needed for a local-dev origin that differs from it.
+  // Comma-separated, same format. PATIENT_APP_BASE_URL (the patient app's
+  // own origin) is always allowed in addition to whatever's listed here, so
+  // this is normally only needed for a local-dev origin that differs from it.
   PUBLIC_CORS_ALLOWED_ORIGIN: z.string().optional(),
 });
 

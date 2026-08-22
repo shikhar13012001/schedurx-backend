@@ -340,9 +340,9 @@ test("GET /api/v1/me requires a valid Firebase token and returns the resolved st
 
 test("POST /api/v1/team/invites normalizes the phone and sends WhatsApp and SMS independently", async () => {
   const { config } = require("../../src/config");
-  const previousBaseUrl = config.APP_BASE_URL;
+  const previousBaseUrl = config.DASHBOARD_BASE_URL;
   const previousContentSid = config.TWILIO_TEAM_INVITE_CONTENT_SID;
-  config.APP_BASE_URL = "https://app.schedurx.test";
+  config.DASHBOARD_BASE_URL = "https://app.schedurx.test";
   config.TWILIO_TEAM_INVITE_CONTENT_SID = undefined;
 
   const firebaseAdminApp = createFirebaseAdminStub({
@@ -380,15 +380,15 @@ test("POST /api/v1/team/invites normalizes the phone and sends WhatsApp and SMS 
       );
     });
   } finally {
-    config.APP_BASE_URL = previousBaseUrl;
+    config.DASHBOARD_BASE_URL = previousBaseUrl;
     config.TWILIO_TEAM_INVITE_CONTENT_SID = previousContentSid;
   }
 });
 
 test("POST /api/v1/team/invites still sends SMS when WhatsApp fails", async () => {
   const { config } = require("../../src/config");
-  const previousBaseUrl = config.APP_BASE_URL;
-  config.APP_BASE_URL = "https://app.schedurx.test";
+  const previousBaseUrl = config.DASHBOARD_BASE_URL;
+  config.DASHBOARD_BASE_URL = "https://app.schedurx.test";
 
   const firebaseAdminApp = createFirebaseAdminStub({
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
@@ -417,7 +417,7 @@ test("POST /api/v1/team/invites still sends SMS when WhatsApp fails", async () =
       assert.equal(body.data.delivery.find((item) => item.channel === "sms").status, "queued");
     });
   } finally {
-    config.APP_BASE_URL = previousBaseUrl;
+    config.DASHBOARD_BASE_URL = previousBaseUrl;
   }
 });
 

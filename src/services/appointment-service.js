@@ -13,7 +13,7 @@ const { config } = require("../config");
 // imported from a routes/ file to avoid a services→routes dependency, since
 // it's one line either way.
 function bookingUrlFor(clinicId, appointmentId) {
-  return config.APP_BASE_URL ? `${config.APP_BASE_URL}/${clinicId}/${appointmentId}` : undefined;
+  return config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${appointmentId}` : undefined;
 }
 
 const SAFE_TITLE_PREFIX = "Appointment";

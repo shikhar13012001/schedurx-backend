@@ -170,10 +170,10 @@ function createApp({
   // "/api/v1"), and Express dispatches to whichever matching middleware was
   // registered first, so this must come first to avoid ever reaching
   // /api/v1's firebaseAuth gate. Own CORS allowlist, separate from the
-  // staff-dashboard one below — the patient frontend's origin (APP_BASE_URL)
+  // staff-dashboard one below — the patient app's origin (PATIENT_APP_BASE_URL)
   // is always allowed in addition to whatever PUBLIC_CORS_ALLOWED_ORIGIN adds.
   {
-    const publicOrigins = [config.APP_BASE_URL, ...(config.PUBLIC_CORS_ALLOWED_ORIGIN?.split(",") ?? [])]
+    const publicOrigins = [config.PATIENT_APP_BASE_URL, ...(config.PUBLIC_CORS_ALLOWED_ORIGIN?.split(",") ?? [])]
       .map((origin) => origin?.trim())
       .filter(Boolean);
     if (publicOrigins.length) {

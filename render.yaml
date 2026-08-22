@@ -75,7 +75,9 @@ services:
         sync: false
       - key: ELEVENLABS_VOICE_ID
         value: "21m00Tcm4TlvDq8ikWAM"
-      - key: APP_BASE_URL
+      - key: PATIENT_APP_BASE_URL
+        sync: false
+      - key: DASHBOARD_BASE_URL
         sync: false
       - key: PUBLIC_CORS_ALLOWED_ORIGIN
         sync: false

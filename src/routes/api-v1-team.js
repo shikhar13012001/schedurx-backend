@@ -65,9 +65,9 @@ function createApiV1TeamRouter(supabaseClient, twilioClient) {
       });
 
       let delivery = [];
-      if (twilioClient && config.APP_BASE_URL) {
+      if (twilioClient && config.DASHBOARD_BASE_URL) {
         const clinic = await clinicSvc.getClinic(supabaseClient, req.staff.clinicId);
-        const link = `${config.APP_BASE_URL}/invite/${invite.token}`;
+        const link = `${config.DASHBOARD_BASE_URL}/invite/${invite.token}`;
         const body = `You've been invited to join ${clinic?.name ?? "the clinic"} on ScheduRx as a ${role}. Tap to join: ${link}`;
         const whatsappOptions = config.TWILIO_TEAM_INVITE_CONTENT_SID
           ? {
