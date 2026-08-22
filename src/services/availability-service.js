@@ -41,17 +41,29 @@ function epochToISO(epochMs, timezone) {
 // assistant-tools.js), so it's centralized here as a single deterministic
 // implementation instead.
 // Example: localToUtcISO("2026-08-18", "16:00", "Asia/Kolkata") → "2026-08-18T10:30:00.000Z"
+// Returns undefined (never throws) for an unparseable dateStr/timeStr — an
+// LLM tool argument, not a value this code controls, so malformed input is
+// expected to happen occasionally. Every caller already treats "the string
+// I got back doesn't produce a valid Date" as the signal to report a clean
+// error instead of booking/tasking garbage — block_time (assistant-tools.js)
+// checks Number.isNaN(new Date(...).getTime()), and add_task already treats
+// a falsy dueAt as "no date given". Before this, a malformed date/time (a
+// hallucinated value, or literally any non-numeric junk) crashed with an
+// uncaught RangeError from .toISOString() on an Invalid Date, taking the
+// whole tool call down instead of surfacing a normal error.
 function localToUtcISO(dateStr, timeStr, timezone) {
-  const [Y, Mo, D] = dateStr.split("-").map(Number);
-  const [h, m] = timeStr.split(":").map(Number);
+  const [Y, Mo, D] = String(dateStr ?? "").split("-").map(Number);
+  const [h, m] = String(timeStr ?? "").split(":").map(Number);
   const approxUtcMs = Date.UTC(Y, Mo - 1, D, h, m, 0);
+  if (Number.isNaN(approxUtcMs)) return undefined;
 
   const approxDate = new Date(approxUtcMs);
   const utcDate = new Date(approxDate.toLocaleString("en-US", { timeZone: "UTC" }));
   const tzDate = new Date(approxDate.toLocaleString("en-US", { timeZone: timezone }));
   const offsetMs = tzDate.getTime() - utcDate.getTime();
 
-  return new Date(approxUtcMs - offsetMs).toISOString();
+  const result = new Date(approxUtcMs - offsetMs);
+  return Number.isNaN(result.getTime()) ? undefined : result.toISOString();
 }
 
 // Human-readable "for a WhatsApp/SMS message" rendering, e.g. "2:45 PM, Mon 24 Aug" —
@@ -222,7 +234,19 @@ async function getAvailableSlots(nettuClient, supabaseClient, opts, log) {
       };
     });
 
-  return { slots, timezone, startDate, endDate };
+  // Zero slots is ambiguous to a caller with no other context — genuinely
+  // fully booked, or the clinic simply isn't open that day at all (e.g. a
+  // Sunday when workingDays excludes it)? The assistant has no way to tell
+  // these apart from an empty slots array alone, and was seen guessing "the
+  // calendar might be blocked" for what was actually just a closed day.
+  // Surface which requested dates aren't working days so callers can say so.
+  const nonWorkingDays = [];
+  for (let d = new Date(`${startDate}T00:00:00Z`); d <= new Date(`${endDate}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1)) {
+    const weekday = d.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+    if (!clinicRules.workingDays.includes(weekday)) nonWorkingDays.push(d.toISOString().slice(0, 10));
+  }
+
+  return { slots, timezone, startDate, endDate, nonWorkingDays };
 }
 
 module.exports = { getAvailableSlots, epochToISO, formatHumanTime, toDateString, localToUtcISO };

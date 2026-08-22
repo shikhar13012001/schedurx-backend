@@ -12,6 +12,7 @@ const availabilitySvc = require("./availability-service");
 const tableSvc = require("./table-service");
 const visitSvc = require("./visit-service");
 const taskSvc = require("./task-service");
+const messagingSvc = require("./messaging-service");
 
 const APPOINTMENT_STATUSES = ["booked", "tentative", "cancelled", "completed", "no_show", "blocked"];
 
@@ -184,13 +185,20 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
       }),
       execute: async ({ doctorId, date }) => {
         try {
-          const { slots, timezone } = await availabilitySvc.getAvailableSlots(
+          const { slots, timezone, nonWorkingDays } = await availabilitySvc.getAvailableSlots(
             nettuClient,
             supabaseClient,
             { clinicId, doctorId, date },
             log,
           );
-          return { timezone, slots: slots.slice(0, 5).map((s) => ({ start: s.start, end: s.end })) };
+          return {
+            timezone,
+            slots: slots.slice(0, 5).map((s) => ({ start: s.start, end: s.end })),
+            // Empty slots is ambiguous on its own — tell the model whether any
+            // requested day is closed at the clinic level, so it can say that
+            // plainly instead of guessing at "the calendar might be blocked".
+            nonWorkingDays: nonWorkingDays?.length ? nonWorkingDays : undefined,
+          };
         } catch (err) {
           return { slots: [], error: err.message };
         }
@@ -203,6 +211,11 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
         query: z.string().describe("Patient name (or partial name) to search for."),
       }),
       execute: async ({ query }) => {
+        // An empty/whitespace query ILIKE-matches every patient at the
+        // clinic (the SQL pattern degenerates to '%%') — silently returning
+        // the first one as "the" match would hand back a random patient's
+        // history for a malformed/empty query instead of a clean error.
+        if (!query?.trim()) return { found: false, matches: [], error: "No search query given." };
         const patients = await tableSvc.searchPatients(supabaseClient, clinicId, query);
         if (!patients?.length) return { found: false, matches: [] };
         const top = patients[0];
@@ -249,6 +262,131 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
           log,
         });
         return { added: true, taskId: task.id, title: task.title };
+      },
+    }),
+
+    list_patient_conversations: tool({
+      description:
+        "List patient WhatsApp/SMS conversations at this clinic that aren't closed. Use to check for messages needing a reply, or before send_message_to_patient to see if a conversation already exists.",
+      inputSchema: z.object({
+        onlyUnread: z.boolean().optional().describe("Restrict to conversations with unread messages. Omit to list every open one."),
+      }),
+      execute: async ({ onlyUnread }) => {
+        try {
+          const threads = await messagingSvc.listThreads(supabaseClient, clinicId, {});
+          const open = threads.filter((t) => t.status !== "closed" && (!onlyUnread || t.unreadCount > 0));
+          const patientIds = [...new Set(open.map((t) => t.patientId).filter(Boolean))];
+          const namesById = new Map();
+          if (patientIds.length) {
+            const { data: patients } = await supabaseClient.from("Patient").select("id, fullName").in("id", patientIds);
+            for (const p of patients ?? []) namesById.set(p.id, p.fullName);
+          }
+          return {
+            count: open.length,
+            threads: open.slice(0, 20).map((t) => ({
+              threadId: t.id,
+              patientName: t.patientId ? (namesById.get(t.patientId) ?? null) : null,
+              channel: t.channel,
+              unreadCount: t.unreadCount,
+              lastMessageAt: t.lastMessageAt,
+            })),
+          };
+        } catch (err) {
+          return { count: 0, threads: [], error: err.message };
+        }
+      },
+    }),
+
+    send_message_to_patient: tool({
+      description:
+        "Send a one-off free-text WhatsApp or SMS message to a specific patient. Uses their open WhatsApp conversation if one exists; otherwise falls back to SMS, since a business can only message freely over WhatsApp within a patient-initiated 24h session — a cold WhatsApp message is never attempted here. For a message every patient with an appointment should get automatically (confirmations, reminders, cancellations), that's already handled by the clinic's configured comms workflows — don't use this tool for those.",
+      inputSchema: z.object({
+        patientName: z.string().describe("The patient's name (or partial name) to search for."),
+        message: z.string().min(1).describe("The exact message text to send, in the staff member's own words."),
+      }),
+      execute: async ({ patientName, message }) => {
+        try {
+          const patients = await tableSvc.searchPatients(supabaseClient, clinicId, patientName);
+          if (!patients?.length) return { sent: false, error: `No patient matching '${patientName}'.` };
+          const patient = patients[0];
+          if (!patient.contactNumber) return { sent: false, error: `${patient.fullName} has no phone number on file.` };
+
+          const threads = await messagingSvc.listThreads(supabaseClient, clinicId, {});
+          const openWhatsapp = threads.find((t) => t.patientId === patient.id && t.channel === "whatsapp" && t.status !== "closed");
+          const thread =
+            openWhatsapp ??
+            (await messagingSvc.findOrCreateThread(supabaseClient, {
+              clinicId,
+              patientId: patient.id,
+              contactPhone: patient.contactNumber,
+              channel: "sms",
+            }));
+
+          const sentMessage = await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body: message }, log, twilioClient);
+          return { sent: true, channel: thread.channel, patientName: patient.fullName, messageId: sentMessage.id };
+        } catch (err) {
+          return { sent: false, error: err.message };
+        }
+      },
+    }),
+
+    notify_appointment_delay: tool({
+      description:
+        "Notify one or more of today's still-upcoming patients that the doctor is running late, by SMS (reliable regardless of WhatsApp session state). Defaults to every patient with a booked/tentative appointment still ahead today for the given doctor — for more than a couple of recipients, confirm the count with the user before calling this, since it sends real messages immediately.",
+      inputSchema: z.object({
+        doctorId: z
+          .string()
+          .describe("The doctor's id — use the current doctor's id from context unless the user names someone else."),
+        minutesLate: z.number().int().positive().describe("How many minutes late, e.g. 20."),
+        patientName: z.string().optional().describe("Notify only this one patient instead of everyone still waiting today."),
+      }),
+      execute: async ({ doctorId, minutesLate, patientName }) => {
+        try {
+          const today = new Date().toISOString().slice(0, 10);
+          const [booked, tentative] = await Promise.all([
+            tableSvc.listAppointmentsForClinic(supabaseClient, clinicId, { doctorId, date: today, status: "booked" }),
+            tableSvc.listAppointmentsForClinic(supabaseClient, clinicId, { doctorId, date: today, status: "tentative" }),
+          ]);
+          let appts = [...booked, ...tentative].filter((a) => new Date(a.timeslot).getTime() > Date.now());
+
+          if (patientName) {
+            const patients = await tableSvc.searchPatients(supabaseClient, clinicId, patientName);
+            if (!patients?.length) return { notified: 0, error: `No patient matching '${patientName}'.` };
+            appts = appts.filter((a) => a.patientId === patients[0].id);
+            if (!appts.length) return { notified: 0, error: `${patients[0].fullName} has no upcoming appointment today with this doctor.` };
+          }
+          if (!appts.length) return { notified: 0, error: "No upcoming appointments today to notify." };
+
+          const patientIds = [...new Set(appts.map((a) => a.patientId).filter(Boolean))];
+          const { data: patientRows } = await supabaseClient.from("Patient").select("id, fullName, contactNumber").in("id", patientIds);
+          const byId = new Map((patientRows ?? []).map((p) => [p.id, p]));
+
+          const body = `Running about ${minutesLate} min late today — sorry for the wait, we'll see you as soon as we can.`;
+          let notified = 0;
+          const failed = [];
+          for (const appt of appts) {
+            const patient = byId.get(appt.patientId);
+            if (!patient?.contactNumber) {
+              failed.push(patient?.fullName ?? appt.patientId);
+              continue;
+            }
+            try {
+              const thread = await messagingSvc.findOrCreateThread(supabaseClient, {
+                clinicId,
+                patientId: patient.id,
+                contactPhone: patient.contactNumber,
+                channel: "sms",
+              });
+              await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body }, log, twilioClient);
+              notified++;
+            } catch {
+              failed.push(patient.fullName);
+            }
+          }
+          return { notified, failed, totalConsidered: appts.length };
+        } catch (err) {
+          return { notified: 0, error: err.message };
+        }
       },
     }),
   };

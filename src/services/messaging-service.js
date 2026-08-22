@@ -55,7 +55,14 @@ async function sendReply(supabaseClient, { clinicId, threadId, staffId, body }, 
   let result;
   if (twilioClient) {
     const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
-    const sent = await twilioClient.sendWhatsApp({ to: thread.contactPhone, from: clinic?.whatsappFrom, body });
+    // Every thread was whatsapp-channel until send_message_to_patient's SMS
+    // fallback (assistant-tools.js) started creating sms-channel ones for
+    // patients with no open WhatsApp session — this always sent WhatsApp
+    // regardless, which would have silently misrouted those.
+    const sent =
+      thread.channel === "sms"
+        ? await twilioClient.sendSms({ to: thread.contactPhone, body })
+        : await twilioClient.sendWhatsApp({ to: thread.contactPhone, from: clinic?.whatsappFrom, body });
     result = { ok: true, stubbed: false, waMessageId: sent?.sid ?? null };
   } else {
     result = await whatsapp.sendWhatsAppMessage({ toPhone: thread.contactPhone, body }, log);
