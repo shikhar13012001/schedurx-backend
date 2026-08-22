@@ -17,9 +17,16 @@ const { validatePlanSelection, estimateMonthlyPaise, PRICE_CONFIG_VERSION } = re
 // PRODUCTION_CHECKLIST.md's message-template work): SMS + an approved
 // WhatsApp Content Template for booking/reschedule/cancellation (dual-send,
 // since the WhatsApp template has no session-window restriction but a
-// brand-new patient contact often does), a 24h WhatsApp reminder, and a
+// brand-new patient contact often does), a 1h-before WhatsApp reminder, and a
 // dual-channel missed-call follow-up. Editable/removable from Automations
 // like anything else — this only changes what a clinic starts with.
+//
+// reminder-24h-wa's id is kept as-is even though it now fires 1h before —
+// renaming it would silently orphan any reminder already queued in
+// nettu-scheduler for an appointment booked while the old 24h timing was
+// live (buildDelayedReminderEntries bakes `${appointmentId}::${w.id}` into
+// nettu at booking time; webhooks-nettu.js looks the id back up in the
+// clinic's *current* workflows when it fires). Only offsetMinutes changed.
 const DEFAULT_COMMUNICATION_WORKFLOWS = [
   {
     id: "booking-conf-sms", channel: "sms", enabled: true, trigger: "booking_confirmed", offsetMinutes: 0,
@@ -46,7 +53,7 @@ const DEFAULT_COMMUNICATION_WORKFLOWS = [
     template: "", contentSid: "HX46afd43a893b38d7955f7c56d4eef7da", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
   },
   {
-    id: "reminder-24h-wa", channel: "whatsapp", enabled: true, trigger: "reminder", offsetMinutes: -1440,
+    id: "reminder-24h-wa", channel: "whatsapp", enabled: true, trigger: "reminder", offsetMinutes: -60,
     template: "", contentSid: "HXf5ad76046a6a799a43cdaf36b657f015", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
   },
   {
