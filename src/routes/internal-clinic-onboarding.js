@@ -124,6 +124,23 @@ function createInternalClinicOnboardingRouter(supabaseClient, nettuClient, fireb
     }
   });
 
+  // E2E test cleanup only. Staff.firebaseUid is 1:1 (getStaffByFirebaseUid
+  // uses .maybeSingle(), which errors if it ever isn't) — so before creating
+  // a fresh test clinic for the one fixed test uid, the suite looks up
+  // whatever clinic it's currently attached to (if a previous run crashed
+  // before its own cleanup ran) and purges that first. Without this, a
+  // second Staff row for the same uid would break /api/v1/me for every
+  // subsequent test, not just leave an extra clinic lying around.
+  router.get("/by-firebase-uid/:uid", async (req, res) => {
+    try {
+      const staff = await staffSvc.getStaffByFirebaseUid(supabaseClient, req.params.uid);
+      return ok(res, { clinicId: staff?.clinicId ?? null });
+    } catch (err) {
+      req.log?.error({ err }, "[internalClinicOnboarding] by-firebase-uid lookup failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
   // E2E test cleanup only. Deliberately not a general clinic-deletion
   // endpoint — no such thing exists anywhere in this product, on purpose —
   // this only ever purges clinics the E2E suite itself created and named
