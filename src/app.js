@@ -35,7 +35,16 @@ function createApp({
   // nosniff, and disabling framing, not a content policy for HTML we don't
   // serve. HSTS is a no-op over plain HTTP, so this is safe to enable before
   // TLS is actually terminated in front of this app.
-  app.use(helmet({ contentSecurityPolicy: false }));
+  //
+  // crossOriginResourcePolicy explicitly set to "cross-origin": helmet's own
+  // default ("same-origin") makes browsers refuse to let a *different*
+  // origin's fetch() read this API's responses at all — this API's entire
+  // reason to exist is being called cross-origin from app.schedurx.com (and
+  // the patient form-agent's own origin), so the default would break every
+  // request the moment those become genuinely different origins. The actual
+  // origin allowlist is still enforced by the `cors` middleware below —
+  // this only stops the extra CORP check from blocking on top of that.
+  app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: "cross-origin" } }));
 
   app.use(
     pinoHttp({
