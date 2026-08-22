@@ -90,6 +90,21 @@ async function findOrCreatePatient(supabase, clinicId, { phone, fullName, age, g
   return data;
 }
 
+// Every clinic today shares one platform Twilio WhatsApp number (see
+// twilio-client.js's header comment) — Clinic.whatsappFrom is only ever set
+// for a clinic with its own dedicated number, which in practice is almost
+// none of them. webhooks-twilio.js's whatsapp-inbound handler falls back to
+// this when the receiving number doesn't exactly match any clinic, to find
+// which clinic(s) this phone number is actually a patient of.
+async function findPatientsByPhoneAcrossClinics(supabase, phone) {
+  const { data, error } = await supabase
+    .from("Patient")
+    .select("id, clinicId, fullName, createdAt")
+    .eq("contactNumber", phone);
+  if (error) throw dbErr(`finding patients by phone: ${error.message}`);
+  return data ?? [];
+}
+
 async function updatePatientFields(supabase, patientId, patch) {
   let query;
   if (Object.keys(patch).length === 0) {
@@ -197,6 +212,7 @@ async function searchPatients(supabase, clinicId, q) {
 module.exports = {
   listActiveDoctors,
   findPatientByPhone,
+  findPatientsByPhoneAcrossClinics,
   createPatient,
   findOrCreatePatient,
   updatePatientFields,

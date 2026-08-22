@@ -246,9 +246,45 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
       // /voice resolves the receiving phone number — a shared Twilio
       // account can send/receive on behalf of more than one clinic's
       // WhatsApp sender, so this can't assume a single fixed clinic.
-      const { data: clinic } = await supabaseClient.from("Clinic").select("*").eq("whatsappFrom", to).maybeSingle();
+      let { data: clinic } = await supabaseClient.from("Clinic").select("*").eq("whatsappFrom", to).maybeSingle();
+
+      // In practice almost no clinic has its own dedicated whatsappFrom yet —
+      // they all share the one platform number, so the exact match above
+      // only ever resolves the one clinic that happens to have it configured
+      // and silently orphans every other clinic's inbound WhatsApp (a real
+      // patient with real bookings under a different clinic would get told
+      // "you have no appointments" by that other clinic's empty data). Fall
+      // back to whichever clinic(s) this phone number is actually a patient
+      // of; if it's a patient of more than one (as can happen once several
+      // clinics share one number), prefer the one with the most recent
+      // appointment activity — the clinic they're actually engaging with.
       if (!clinic) {
-        req.log?.warn({ to }, "[webhooks:twilio] whatsapp-inbound — no clinic owns this WhatsApp number");
+        const candidates = await tableSvc.findPatientsByPhoneAcrossClinics(supabaseClient, from);
+        let resolvedClinicId = null;
+        if (candidates.length === 1) {
+          resolvedClinicId = candidates[0].clinicId;
+        } else if (candidates.length > 1) {
+          const { data: recentAppt } = await supabaseClient
+            .from("Appointment")
+            .select("clinicId, createdAt")
+            .in(
+              "patientId",
+              candidates.map((c) => c.id),
+            )
+            .order("createdAt", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          resolvedClinicId =
+            recentAppt?.clinicId ??
+            [...candidates].sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))[0].clinicId;
+        }
+        if (resolvedClinicId) {
+          ({ data: clinic } = await supabaseClient.from("Clinic").select("*").eq("id", resolvedClinicId).maybeSingle());
+        }
+      }
+
+      if (!clinic) {
+        req.log?.warn({ to, from }, "[webhooks:twilio] whatsapp-inbound — no clinic owns this WhatsApp number");
         return emptyReply();
       }
 
