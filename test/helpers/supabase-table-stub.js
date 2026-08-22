@@ -13,9 +13,18 @@ function matches(row, filters) {
     if (op === "lt") return row[col] < val;
     if (op === "is" && val === null) return row[col] == null;
     if (op === "in") return Array.isArray(val) && val.includes(row[col]);
+    if (op === "ilike") return matchesIlike(row[col], val);
     if (op === "or") return matchesOr(row, val);
     return true;
   });
+}
+
+// Mirrors supabase-js's .ilike(col, pattern) — case-insensitive, with SQL's
+// "%" (any run of characters) and "_" (any one character) wildcards.
+function matchesIlike(cellValue, pattern) {
+  if (cellValue == null) return false;
+  const regex = "^" + String(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/%/g, ".*").replace(/_/g, ".") + "$";
+  return new RegExp(regex, "i").test(String(cellValue));
 }
 
 // Mirrors supabase-js's .or("col.eq.val,col2.is.null") — comma-separated
@@ -68,6 +77,10 @@ function createTableStub(initialTables = {}) {
         filters.push(["in", col, vals]);
         return this;
       },
+      ilike(col, val) {
+        filters.push(["ilike", col, val]);
+        return this;
+      },
       gte(col, val) {
         filters.push(["gte", col, val]);
         return this;
@@ -91,7 +104,11 @@ function createTableStub(initialTables = {}) {
       order(col, { ascending = true } = {}) {
         orderCol = col;
         orderAsc = ascending;
-        return Promise.resolve({ data: currentRows(), error: null });
+        // Chainable like every other filter method (eq/gte/...), not
+        // terminal — .limit()/.maybeSingle() can follow, same as real
+        // supabase-js. Still awaitable bare via the builder's own .then()
+        // below when nothing follows it.
+        return this;
       },
       // Real supabase-js query builders are themselves thenable — a query can
       // be awaited directly after any filter chain, with no terminal method

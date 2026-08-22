@@ -90,7 +90,7 @@ const DEFAULT_RULES = {
   bufferMins: 5,
   minNoticeHours: 2,
   maxBookingWindowDays: 14,
-  cancellationCutoffHours: 24,
+  cancellationCutoffHours: 1,
   rescheduleCutoffHours: 24,
 };
 

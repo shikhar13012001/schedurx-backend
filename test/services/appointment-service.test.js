@@ -91,6 +91,8 @@ function makeSupabase({ clinic, doctor, appointment } = {}) {
               timeslot: self._inserts?.timeslot ?? null,
               symptoms: self._inserts?.symptoms ?? null,
               status: self._inserts?.status ?? "booked",
+              mode: self._inserts?.mode ?? "clinic",
+              tokenRequested: self._inserts?.tokenRequested ?? false,
               schedulerEventId: self._inserts?.schedulerEventId ?? null,
               source: self._inserts?.source ?? "system",
               auditHistory: self._inserts?.auditHistory ?? [],
@@ -140,6 +142,54 @@ describe("bookAppointment", () => {
     assert.equal(result.doctorId, "doc-priya-001");
     assert.equal(result.status, "booked");
     assert.ok(result.appointmentId.startsWith("apt_"));
+  });
+
+  // Regression test: the booking form always collected consultation mode
+  // and a token-payment choice, but bookAppointment silently dropped both —
+  // a receptionist could pick Video + enable the token lock, see a success
+  // toast, and the appointment would be created as plain in-clinic/unpaid.
+  test("persists mode and tokenRequested instead of silently dropping them", async () => {
+    const supabaseClient = makeSupabase();
+    const result = await bookAppointment(makeNettu(), supabaseClient, {
+      clinicId: "poc-clinic-001",
+      doctorId: "doc-priya-001",
+      start: FUTURE_START,
+      patient: { name: "Test Patient", phone: "+919999999999" },
+      source: "reception",
+      mode: "video",
+      tokenRequested: true,
+    });
+
+    assert.equal(result.mode, "video");
+    assert.equal(result.tokenRequested, true);
+  });
+
+  test("defaults mode to clinic and tokenRequested to false when omitted", async () => {
+    const supabaseClient = makeSupabase();
+    const result = await bookAppointment(makeNettu(), supabaseClient, {
+      clinicId: "poc-clinic-001",
+      doctorId: "doc-priya-001",
+      start: FUTURE_START,
+      patient: { name: "Test Patient", phone: "+919999999999" },
+      source: "reception",
+    });
+
+    assert.equal(result.mode, "clinic");
+    assert.equal(result.tokenRequested, false);
+  });
+
+  test("rejects an invalid mode", async () => {
+    await assert.rejects(
+      bookAppointment(makeNettu(), makeSupabase(), {
+        clinicId: "poc-clinic-001",
+        doctorId: "doc-priya-001",
+        start: FUTURE_START,
+        patient: { name: "Test Patient", phone: "+919999999999" },
+        source: "reception",
+        mode: "carrier-pigeon",
+      }),
+      (err) => err.code === "INVALID_MODE",
+    );
   });
 
   test("fires the clinic's configured booking_confirmed workflow via the real twilioClient wiring", async () => {

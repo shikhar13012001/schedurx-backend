@@ -2,6 +2,7 @@ const { Router } = require("express");
 const { ok, fail } = require("../lib/response-envelope");
 const tableSvc = require("../services/table-service");
 const appointmentSvc = require("../services/appointment-service");
+const availabilitySvc = require("../services/availability-service");
 
 // GET /api/v1/appointments?date=YYYY-MM-DD&doctorId=... — clinicId always comes
 // from req.staff (set by firebaseAuth), never from the query string.
@@ -25,12 +26,38 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
     }
   });
 
+  // GET /api/v1/appointments/slots?doctorId=&date= — real nettu-scheduler
+  // availability (excludes existing appointments/blocks), the staff-facing
+  // twin of GET /api/v1/public/slots. Existed for the patient booking API
+  // but not here — the dashboard's own booking sheet only ever computed
+  // slots from clinic hours and slot length, with no idea what was already
+  // taken, so an already-booked time stayed selectable right up until the
+  // server rejected it after the whole form was filled out.
+  router.get("/slots", async (req, res) => {
+    if (!nettuClient) return fail(res, 503, "SCHEDULER_NOT_CONFIGURED", "Calendar scheduling is not configured");
+
+    const { doctorId, date } = req.query;
+    if (!doctorId) return fail(res, 422, "MISSING_FIELDS", "doctorId is required");
+    try {
+      const result = await availabilitySvc.getAvailableSlots(
+        nettuClient,
+        supabaseClient,
+        { clinicId: req.staff.clinicId, doctorId, date },
+        req.log,
+      );
+      return ok(res, result);
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:appointments] get slots failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
   router.post("/", async (req, res) => {
     if (!nettuClient) {
       return fail(res, 503, "SCHEDULER_NOT_CONFIGURED", "Calendar scheduling is not configured");
     }
 
-    const { doctorId, start, end, reason, notes, bookerRelation, proxyName, patient } = req.body ?? {};
+    const { doctorId, start, end, reason, notes, bookerRelation, proxyName, patient, mode, tokenRequested } = req.body ?? {};
     if (!doctorId || !start || !patient?.phone) {
       return fail(res, 422, "MISSING_FIELDS", "doctorId, start, and patient.phone are required");
     }
@@ -57,6 +84,8 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
           notes,
           bookerRelation,
           proxyName,
+          mode,
+          tokenRequested,
           source: "reception",
         },
         req.log,

@@ -32,6 +32,15 @@ function createSupabaseStub({ clinic = null } = {}) {
           this._filters[col] = val;
           return this;
         },
+        ilike() {
+          return this;
+        },
+        order() {
+          return this;
+        },
+        limit() {
+          return this;
+        },
         insert(data) {
           this._inserted = data;
           return this;

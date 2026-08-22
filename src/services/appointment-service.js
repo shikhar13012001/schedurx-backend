@@ -74,7 +74,13 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
     proxyName,
     notes,
     status = "booked",
+    mode = "clinic",
+    tokenRequested = false,
   } = opts;
+
+  if (!["clinic", "video", "audio", "text"].includes(mode)) {
+    throw Object.assign(new Error(`Invalid mode '${mode}'`), { code: "INVALID_MODE", statusCode: 422 });
+  }
 
   const clinic = await clinicSvc.requireActiveClinic(supabaseClient, clinicId);
   const doctor = await doctorSvc.requireActiveDoctor(supabaseClient, doctorId, clinicId);
@@ -108,6 +114,48 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
   log?.info({ clinicId, doctorId, start, source }, "[appointmentSvc] booking appointment");
 
   const durationMs = endMs - startMs;
+  const isBlocked = status === "blocked";
+
+  // A block is a deliberate doctor override, not something that should
+  // silently coexist with a real booking already sitting in that window (the
+  // nettu busy-event conflict check below only guards against two blocks
+  // racing each other, not against pre-existing patient appointments — those
+  // just sat there, unnotified, alongside the new block). Cancel every
+  // booked/tentative appointment the new block actually overlaps first, each
+  // with the same patient-facing cancellation message a normal cancel sends
+  // — bypassing the cancellation cutoff since this is staff-forced, not a
+  // patient request close to their own appointment.
+  if (isBlocked) {
+    const { data: possiblyConflicting, error: conflictErr } = await supabaseClient
+      .from("Appointment")
+      .select("id, timeslot, durationMinutes")
+      .eq("clinicId", clinicId)
+      .eq("doctorId", doctorId)
+      .in("status", ["booked", "tentative"])
+      .gte("timeslot", new Date(startMs - 24 * 60 * 60 * 1000).toISOString())
+      .lt("timeslot", new Date(endMs).toISOString());
+
+    if (conflictErr) {
+      log?.warn({ err: conflictErr, doctorId, clinicId }, "[appointmentSvc] couldn't check for conflicting appointments before blocking — proceeding without auto-cancel");
+    } else {
+      for (const conflict of possiblyConflicting ?? []) {
+        const conflictStartMs = new Date(conflict.timeslot).getTime();
+        const conflictEndMs = conflictStartMs + (conflict.durationMinutes ?? 30) * 60_000;
+        if (conflictEndMs <= startMs || conflictStartMs >= endMs) continue; // fetched for margin, doesn't actually overlap
+        try {
+          await cancelAppointment(
+            nettuClient,
+            supabaseClient,
+            { appointmentId: conflict.id, clinicId, reason: reason ?? "Doctor became unavailable at this time", source, bypassCutoff: true },
+            log,
+            twilioClient,
+          );
+        } catch (err) {
+          log?.error({ err, appointmentId: conflict.id }, "[appointmentSvc] couldn't auto-cancel conflicting appointment before blocking");
+        }
+      }
+    }
+  }
 
   // Generated up front (not after the nettu call) so it can ride along in
   // the event's metadata — the reminder webhook only gets the CalendarEvent
@@ -123,7 +171,6 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
   // "<appointmentId>::<workflowId>" identifier) — see webhooks-nettu.js for
   // what happens on receipt of each. Blocked-time entries have no patient, so
   // they only ever get the staff entry, never workflow ones.
-  const isBlocked = status === "blocked";
   const reminders = [
     { delta: -REMINDER_MINUTES_BEFORE, identifier: appointmentId },
     ...(isBlocked ? [] : commsWorkflowSvc.buildDelayedReminderEntries(clinic, appointmentId)),
@@ -188,6 +235,8 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
       proxyName: proxyName ?? null,
       durationMinutes: Math.round(durationMs / 60_000),
       status,
+      mode,
+      tokenRequested,
       schedulerEventId: nettuEvent?.id ?? null,
       source,
       auditHistory: [auditEntry],
@@ -242,6 +291,8 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
     start: epochToISO(startMs, timezone),
     end: epochToISO(endMs, timezone),
     status: appointment.status,
+    mode: appointment.mode,
+    tokenRequested: appointment.tokenRequested,
     patient: { name: patient?.name ?? null, phone: patient?.phone ?? null },
     source: appointment.source,
   };
@@ -287,8 +338,9 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
   const doctorRules = doctorSvc.getSchedulingRules(doctor, clinicRules);
   const timezone = doctorRules.timezone;
 
-  // Enforce reschedule cutoff.
-  if (appt.timeslot) {
+  // Enforce reschedule cutoff — skipped for a blocked-time entry, same as
+  // cancelAppointment's identical exception (no patient to protect).
+  if (appt.status !== "blocked" && appt.timeslot) {
     const originalStartMs = new Date(appt.timeslot).getTime();
     const cutoffMs = clinicRules.rescheduleCutoffHours * 60 * 60 * 1000;
     if (originalStartMs - Date.now() < cutoffMs) {
@@ -455,7 +507,7 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
 
 // opts: { appointmentId, clinicId, reason?, source? }
 async function cancelAppointment(nettuClient, supabaseClient, opts, log, twilioClient) {
-  const { appointmentId, clinicId, reason, source = "system" } = opts;
+  const { appointmentId, clinicId, reason, source = "system", bypassCutoff = false } = opts;
 
   const { data: appt, error: fetchErr } = await supabaseClient
     .from("Appointment")
@@ -487,8 +539,10 @@ async function cancelAppointment(nettuClient, supabaseClient, opts, log, twilioC
   const clinic = await clinicSvc.requireActiveClinic(supabaseClient, clinicId);
   const clinicRules = clinicSvc.getSchedulingRules(clinic);
 
-  // Enforce cancellation cutoff.
-  if (appt.timeslot) {
+  // Enforce cancellation cutoff — skipped for a blocked-time entry (no
+  // patient to protect) and for a staff-forced override (e.g. a new block
+  // displacing this appointment; see bookAppointment's conflict-cancel step).
+  if (appt.status !== "blocked" && !bypassCutoff && appt.timeslot) {
     const appointmentMs = new Date(appt.timeslot).getTime();
     const cutoffMs = clinicRules.cancellationCutoffHours * 60 * 60 * 1000;
     if (appointmentMs - Date.now() < cutoffMs) {

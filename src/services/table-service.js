@@ -34,12 +34,31 @@ async function listActiveDoctors(supabase, clinicId) {
 
 // ─── Patients ─────────────────────────────────────────────────────────────────
 
+// Indian mobile numbers are always exactly 10 digits — matching on just the
+// last 10 (via an ILIKE suffix) makes lookups format-agnostic, since every
+// entry point that captures a phone number (dashboard PhoneField, WhatsApp's
+// Twilio "From" header, the public intake form, a manual walk-in entry) has
+// historically stored it differently ("+919876543210" vs "919876543210" vs a
+// bare "9876543210"). An exact-string match here was the actual root cause of
+// "WhatsApp says I have no bookings" — a real patient with real appointments
+// booked through the dashboard, messaging from that same number, silently got
+// a brand-new empty Patient record instead of finding their own.
+function phoneSuffixPattern(phone) {
+  const digits = String(phone ?? "").replace(/\D/g, "");
+  return `%${digits.slice(-10)}`;
+}
+
 async function findPatientByPhone(supabase, clinicId, phone) {
   const { data, error } = await supabase
     .from("Patient")
     .select("*")
-    .eq("contactNumber", phone)
+    .ilike("contactNumber", phoneSuffixPattern(phone))
     .eq("clinicId", clinicId)
+    // Oldest first — if the format-mismatch bug already left duplicate rows
+    // for the same person behind, the earliest one is the real record with
+    // the actual booking history; later ones are the bug's own artifacts.
+    .order("createdAt", { ascending: true })
+    .limit(1)
     .maybeSingle();
   if (error) throw dbErr(`finding patient: ${error.message}`);
   return data ?? null;
@@ -100,7 +119,7 @@ async function findPatientsByPhoneAcrossClinics(supabase, phone) {
   const { data, error } = await supabase
     .from("Patient")
     .select("id, clinicId, fullName, createdAt")
-    .eq("contactNumber", phone);
+    .ilike("contactNumber", phoneSuffixPattern(phone));
   if (error) throw dbErr(`finding patients by phone: ${error.message}`);
   return data ?? [];
 }
