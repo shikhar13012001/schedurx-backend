@@ -57,7 +57,12 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
             id: a.id,
             doctorId: a.doctorId,
             patientName: a.patientId ? (namesById.get(a.patientId) ?? null) : null,
-            start: a.timeslot,
+            // The stored timeslot is a bare UTC instant with no offset — live
+            // eval caught the model reading it as-is and telling the staff
+            // member "01:07 AM (UTC)" instead of their own clinic-local
+            // time. availabilitySvc.epochToISO stamps the real offset, same
+            // fix formatHumanTime already applies for patient-facing text.
+            start: availabilitySvc.epochToISO(new Date(a.timeslot).getTime(), timezone),
             status: a.status,
           })),
         };
@@ -342,12 +347,38 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
       }),
       execute: async ({ doctorId, minutesLate, patientName }) => {
         try {
-          const today = new Date().toISOString().slice(0, 10);
+          // Clinic-local calendar date, not UTC — live eval caught this
+          // silently finding zero appointments during the IST evening/night
+          // window where the UTC date has already rolled to "tomorrow"
+          // relative to a timeslot still stored under today's IST date. Same
+          // day-boundary class of bug as the assistant's earlier
+          // "already-passed" fix (api-v1-assistant.js) and block_time's.
+          //
+          // listAppointmentsForClinic's own date filter compares the bare
+          // date string directly against the stored (UTC) timeslot, so it
+          // can't be handed a timezone-correct "today" directly — a
+          // genuinely-IST "today" can be a full UTC calendar day *behind*
+          // the timeslot it's stored under (IST is ahead of UTC), so a
+          // dateFrom/dateTo of exactly today/tomorrow can undershoot and
+          // exclude appointments this fix is specifically trying to include.
+          // Net a day on each side with the existing bare-string filter
+          // (guaranteed to over-include, never under-include) and narrow to
+          // the clinic's actual local day with real UTC instants below.
+          const shiftDate = (dateStr, days) => new Date(new Date(`${dateStr}T00:00:00Z`).getTime() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const today = new Date().toLocaleDateString("en-CA", { timeZone: timezone });
+          const netFrom = shiftDate(today, -1);
+          const netTo = shiftDate(today, 2);
+          const dayStartMs = new Date(availabilitySvc.localToUtcISO(today, "00:00", timezone)).getTime();
+          const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+
           const [booked, tentative] = await Promise.all([
-            tableSvc.listAppointmentsForClinic(supabaseClient, clinicId, { doctorId, date: today, status: "booked" }),
-            tableSvc.listAppointmentsForClinic(supabaseClient, clinicId, { doctorId, date: today, status: "tentative" }),
+            tableSvc.listAppointmentsForClinic(supabaseClient, clinicId, { doctorId, dateFrom: netFrom, dateTo: netTo, status: "booked" }),
+            tableSvc.listAppointmentsForClinic(supabaseClient, clinicId, { doctorId, dateFrom: netFrom, dateTo: netTo, status: "tentative" }),
           ]);
-          let appts = [...booked, ...tentative].filter((a) => new Date(a.timeslot).getTime() > Date.now());
+          let appts = [...booked, ...tentative].filter((a) => {
+            const ms = new Date(a.timeslot).getTime();
+            return ms > Date.now() && ms >= dayStartMs && ms < dayEndMs;
+          });
 
           if (patientName) {
             const patients = await tableSvc.searchPatients(supabaseClient, clinicId, patientName);

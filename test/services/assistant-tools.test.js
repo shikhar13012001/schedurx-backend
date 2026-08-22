@@ -86,6 +86,20 @@ describe("list_appointments", () => {
     assert.equal(byId["apt-2"].patientName, "Vikram Nair");
   });
 
+  // Live eval against the deployed assistant caught it reading the stored
+  // UTC digits as-is and telling a staff member "01:07 AM (UTC)" — real,
+  // reproduced-in-production bug, not hypothetical.
+  test("start comes back in clinic-local time, not the bare stored UTC instant", async () => {
+    const supabaseClient = createTableStub(makeTables({
+      Appointment: [{ id: "apt-tz", clinicId: CLINIC_ID, doctorId: "doc-1", patientId: "pat-1", timeslot: "2026-08-23T01:07:21.933Z", status: "booked" }],
+    }));
+    const tools = makeTools(supabaseClient);
+    const result = await tools.list_appointments.execute({});
+    const appt = result.appointments.find((a) => a.id === "apt-tz");
+    assert.match(appt.start, /^2026-08-23T06:37:21/); // 01:07 UTC + 5:30 = 06:37 IST
+    assert.match(appt.start, /\+05:30$/);
+  });
+
   test("filters by doctorId", async () => {
     const tools = makeTools(createTableStub(makeTables()));
     const result = await tools.list_appointments.execute({ doctorId: "doc-2" });
@@ -391,6 +405,18 @@ describe("send_message_to_patient", () => {
 });
 
 describe("notify_appointment_delay", () => {
+  // The "today" computation's IST-vs-UTC day-boundary bug (live eval against
+  // the deployed assistant caught it silently finding zero appointments
+  // during the IST evening/night window where the UTC calendar date has
+  // already rolled to "tomorrow") isn't covered by a mocked-clock test here
+  // — node:test's global Date mock reliably leaked into sibling tests in
+  // this file regardless of enable/setTime/reset teardown, making that
+  // approach itself flaky. The fix (toLocaleDateString with the clinic's
+  // timezone, matching the identical pattern already used and tested in
+  // api-v1-assistant.js's systemPromptFor) was instead verified directly
+  // against the live deployed assistant with a real appointment stored
+  // under this exact boundary condition.
+
   test("notifies every upcoming patient for the doctor today by default", async () => {
     const soon = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const later = new Date(Date.now() + 90 * 60 * 1000).toISOString();
