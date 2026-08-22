@@ -1,4 +1,5 @@
 const express = require("express");
+const helmet = require("helmet");
 const pinoHttp = require("pino-http");
 const { config } = require("./config");
 const { logger } = require("./logger");
@@ -28,6 +29,13 @@ function createApp({
 }) {
   const app = express();
   app.set("trust proxy", config.trustProxy);
+
+  // CSP off: this is a JSON API (plus /docs' Swagger UI, which needs inline
+  // script/style CSP would break) — the meaningful headers here are HSTS,
+  // nosniff, and disabling framing, not a content policy for HTML we don't
+  // serve. HSTS is a no-op over plain HTTP, so this is safe to enable before
+  // TLS is actually terminated in front of this app.
+  app.use(helmet({ contentSecurityPolicy: false }));
 
   app.use(
     pinoHttp({
