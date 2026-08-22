@@ -13,6 +13,12 @@ const doctorSvc = require("../services/doctor-service");
 const calendarSvc = require("../services/calendar-service");
 const staffSvc = require("../services/staff-service");
 
+// Any clinic the E2E suite creates is named with this prefix — DELETE below
+// refuses to touch anything else, so a bug in a test (or a leaked
+// INTERNAL_API_KEY) can never purge a real clinic's data, only ones
+// self-identified as disposable test fixtures.
+const TEST_CLINIC_NAME_PREFIX = "[E2E]";
+
 function createInternalClinicOnboardingRouter(supabaseClient, nettuClient, firebaseAdminApp) {
   const router = Router();
 
@@ -114,6 +120,26 @@ function createInternalClinicOnboardingRouter(supabaseClient, nettuClient, fireb
       );
     } catch (err) {
       req.log?.error({ err }, "[internalClinicOnboarding] failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
+  // E2E test cleanup only. Deliberately not a general clinic-deletion
+  // endpoint — no such thing exists anywhere in this product, on purpose —
+  // this only ever purges clinics the E2E suite itself created and named
+  // with TEST_CLINIC_NAME_PREFIX.
+  router.delete("/:id", async (req, res) => {
+    try {
+      const clinic = await clinicSvc.getClinic(supabaseClient, req.params.id);
+      if (!clinic) return ok(res, { deleted: false, reason: "not found" });
+      if (!clinic.name?.startsWith(TEST_CLINIC_NAME_PREFIX)) {
+        return fail(res, 403, "NOT_A_TEST_CLINIC", `Refusing to delete a clinic not named with the ${TEST_CLINIC_NAME_PREFIX} prefix`);
+      }
+      const { errors } = await clinicSvc.purgeClinic(supabaseClient, req.params.id);
+      if (errors.length) req.log?.warn({ clinicId: req.params.id, errors }, "[internalClinicOnboarding] purge had partial failures");
+      return ok(res, { deleted: true, errors });
+    } catch (err) {
+      req.log?.error({ err }, "[internalClinicOnboarding] purge failed");
       return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
     }
   });

@@ -361,12 +361,63 @@ async function updateClinicSettings(supabaseClient, clinicId, patch) {
   return data.settings;
 }
 
+// E2E test cleanup only — deletes every row belonging to a clinic, across
+// every table this app writes to, then the Clinic row itself. The route
+// calling this additionally requires the clinic's name to start with
+// TEST_CLINIC_NAME_PREFIX before ever reaching here — this function itself
+// has no such guard, so it must never be exposed without that check
+// upstream. Most tables carry clinicId directly; PushSubscription, ChatMsg,
+// and Reminder don't, so those go through staffId/threadId/appointmentId
+// collected up front instead. Each table is deleted independently and
+// failures are collected rather than aborting the whole purge, since a
+// half-cleaned test clinic is a much smaller problem than one table's
+// hiccup blocking every other table's cleanup.
+async function purgeClinic(supabaseClient, clinicId) {
+  const errors = [];
+  const tryDelete = async (label, fn) => {
+    const { error } = await fn();
+    if (error) errors.push(`${label}: ${error.message}`);
+  };
+
+  const [{ data: staffRows }, { data: threadRows }, { data: apptRows }] = await Promise.all([
+    supabaseClient.from("Staff").select("id").eq("clinicId", clinicId),
+    supabaseClient.from("Thread").select("id").eq("clinicId", clinicId),
+    supabaseClient.from("Appointment").select("id").eq("clinicId", clinicId),
+  ]);
+  const staffIds = (staffRows ?? []).map((r) => r.id);
+  const threadIds = (threadRows ?? []).map((r) => r.id);
+  const apptIds = (apptRows ?? []).map((r) => r.id);
+
+  if (staffIds.length) {
+    await tryDelete("PushSubscription", () => supabaseClient.from("PushSubscription").delete().in("staffId", staffIds));
+  }
+  if (threadIds.length) {
+    await tryDelete("ChatMsg", () => supabaseClient.from("ChatMsg").delete().in("threadId", threadIds));
+  }
+  if (apptIds.length) {
+    await tryDelete("Reminder", () => supabaseClient.from("Reminder").delete().in("appointmentId", apptIds));
+  }
+
+  const directTables = [
+    "CallLog", "Invoice", "Notification", "QueueItem", "Task", "Visit", "WaLog",
+    "Thread", "Appointment", "Patient", "StaffInvite", "PhoneNumberRoute", "Staff", "Doctor",
+  ];
+  for (const table of directTables) {
+    await tryDelete(table, () => supabaseClient.from(table).delete().eq("clinicId", clinicId));
+  }
+
+  await tryDelete("Clinic", () => supabaseClient.from("Clinic").delete().eq("id", clinicId));
+
+  return { errors };
+}
+
 module.exports = {
   getClinic,
   requireActiveClinic,
   getSchedulingRules,
   saveSchedulerIds,
   createClinic,
+  purgeClinic,
   updateClinicProfile,
   updateClinicPlan,
   updateClinicCallForwarding,
