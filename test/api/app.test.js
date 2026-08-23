@@ -2266,6 +2266,79 @@ test("POST /webhooks/twilio/whatsapp-inbound replies empty TwiML when no clinic 
   });
 });
 
+// Phase 4: a click-to-chat deep link (wa.me/<number>?text=BOOKING%20<id>)
+// arrives as this exact text — resolveBookingThread() in webhooks-twilio.js
+// resolves straight to the appointment's own clinic/doctor/thread, verified
+// against the inbound phone before ever attaching.
+test("POST /webhooks/twilio/whatsapp-inbound with a BOOKING deep link attaches a booking-scoped Thread when the phone matches", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
+    Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919888888888" }],
+    Appointment: [{ id: "apt_booking_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      // Deliberately a "To" number that owns no clinic — proves this resolved
+      // via the appointment id, not the normal whatsappFrom lookup.
+      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+10000000000", Body: "BOOKING apt_booking_1", MessageSid: "SM-booking-1" }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.equal(supabaseClient._tables.Thread.length, 1);
+  const thread = supabaseClient._tables.Thread[0];
+  assert.equal(thread.scope, "booking");
+  assert.equal(thread.appointmentId, "apt_booking_1");
+  assert.equal(thread.doctorId, "doc-1");
+});
+
+test("POST /webhooks/twilio/whatsapp-inbound rejects a BOOKING deep link when the phone doesn't match the appointment's patient", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
+    Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919888888888" }],
+    Appointment: [{ id: "apt_booking_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      // A different phone number than apt_booking_1's own patient — must not attach.
+      body: formBody({ From: "whatsapp:+919000000000", To: "whatsapp:+19789069398", Body: "BOOKING apt_booking_1", MessageSid: "SM-booking-2" }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.equal(supabaseClient._tables.Thread.length, 1);
+  const thread = supabaseClient._tables.Thread[0];
+  assert.equal(thread.scope, "general");
+  assert.equal(thread.appointmentId ?? null, null);
+  assert.equal(thread.contactPhone, "+919000000000");
+});
+
 // Phase 1: entitlementsForPlan() gates whether the full conversational
 // WhatsApp agent runs, or a clinic gets the structured/CTA fallback instead —
 // see webhooks-twilio.js's whatsapp-inbound handler and buildStructuredFallbackReply.

@@ -113,6 +113,56 @@ async function classifyAndStoreTriage(supabaseClient, openaiClient, threadId, bo
   }
 }
 
+// Last-10-digits match, same tolerance the dashboard's own phone lookups use
+// (booking-sheet.tsx) — robust against +91/91/bare-10-digit formatting
+// differences between how a number was typed at booking time vs. what
+// Twilio hands back as the inbound From.
+function phonesMatch(a, b) {
+  if (!a || !b) return false;
+  const digitsA = a.replace(/\D/g, "").slice(-10);
+  const digitsB = b.replace(/\D/g, "").slice(-10);
+  return digitsA.length === 10 && digitsA === digitsB;
+}
+
+// Resolves a booking-ID deep link's target thread — null if the id doesn't
+// exist, the appointment has no patient/phone on file, or (critically) the
+// inbound phone doesn't match that appointment's own patient. Never throws;
+// the caller falls back to normal phone-based resolution on a null return.
+async function resolveBookingThread(supabaseClient, appointmentId, fromPhone, log) {
+  const { data: appointment } = await supabaseClient
+    .from("Appointment")
+    .select("id, clinicId, doctorId, patientId")
+    .eq("id", appointmentId)
+    .maybeSingle();
+  if (!appointment?.clinicId) return null;
+
+  const [{ data: clinic }, { data: patient }] = await Promise.all([
+    supabaseClient.from("Clinic").select("*").eq("id", appointment.clinicId).maybeSingle(),
+    appointment.patientId
+      ? supabaseClient.from("Patient").select("*").eq("id", appointment.patientId).maybeSingle()
+      : Promise.resolve({ data: null }),
+  ]);
+  if (!clinic || !patient?.contactNumber) return null;
+
+  if (!phonesMatch(fromPhone, patient.contactNumber)) {
+    log?.warn(
+      { appointmentId, clinicId: clinic.id },
+      "[webhooks:twilio] booking-ID deep link phone mismatch — rejecting, falling back to normal resolution",
+    );
+    return null;
+  }
+
+  const thread = await messagingSvc.findOrCreateBookingThread(supabaseClient, {
+    clinicId: clinic.id,
+    appointmentId: appointment.id,
+    doctorId: appointment.doctorId,
+    patientId: patient.id,
+    contactPhone: fromPhone,
+  });
+
+  return { clinic, patient, thread };
+}
+
 // The non-conversational-AI reply for a clinic whose plan doesn't include
 // whatsappConversationalAi (basic, or custom without the ai_whatsapp_agent
 // addon) — every plan still gets whatsappStructuredBooking per
@@ -263,6 +313,47 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
           .eq("waMessageId", messageSid)
           .maybeSingle();
         if (existing) return emptyReply();
+      }
+
+      // Booking-ID fast path (Phase 4): a click-to-chat deep link
+      // (wa.me/<number>?text=BOOKING%20<appointmentId>, from the thank-you
+      // page CTA — Phase 7) arrives as this exact text as the message body.
+      // Resolving via the appointment id directly (rather than the messy
+      // phone-based clinic/thread resolution below) also sidesteps the
+      // "which clinic does this phone belong to" ambiguity entirely — but
+      // only once the inbound phone is verified to actually be that
+      // appointment's own patient's phone, so a leaked/guessed booking id
+      // can't be used to read or attach to someone else's thread.
+      const bookingMatch = /^BOOKING\s+(apt_[\w-]+)/i.exec(body.trim());
+      if (bookingMatch) {
+        const bookingThread = await resolveBookingThread(supabaseClient, bookingMatch[1], from, req.log);
+        if (bookingThread) {
+          const { clinic, patient, thread } = bookingThread;
+          await messagingSvc.recordInboundMessage(supabaseClient, { clinicId: clinic.id, thread, body, waMessageId: messageSid });
+          await classifyAndStoreTriage(supabaseClient, openaiClient, thread.id, body, req.log);
+
+          const entitlements = plansSvc.entitlementsForPlan(clinic.plan?.planId, clinic.plan?.addonIds);
+          if (!assistantModel || !entitlements.whatsappConversationalAi) {
+            if (!entitlements.whatsappStructuredBooking) return emptyReply();
+            const replyText = buildStructuredFallbackReply(clinic, from);
+            await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
+            const twiml = new MessagingResponse();
+            twiml.message(replyText);
+            return res.type("text/xml").send(twiml.toString());
+          }
+
+          const replyText = await whatsappAgentSvc.respondToPatientMessage(
+            { supabaseClient, nettuClient, twilioClient, assistantModel, clinic, patient, thread },
+            req.log,
+          );
+          if (!replyText) return emptyReply();
+          await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
+          const twiml = new MessagingResponse();
+          twiml.message(replyText);
+          return res.type("text/xml").send(twiml.toString());
+        }
+        // No match, or the phone didn't verify — fall through to the normal
+        // phone-based resolution below rather than trusting the claimed id.
       }
 
       // Resolves the receiving WhatsApp number to a clinic exactly like

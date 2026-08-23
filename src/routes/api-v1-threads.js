@@ -33,9 +33,19 @@ function createApiV1ThreadsRouter(supabaseClient, twilioClient) {
     }
   });
 
+  // Doctor isolation (Phase 4): a doctor only sees their own booking-scoped
+  // threads plus every general one — see messaging-service.js's
+  // isVisibleToStaff for the exact rule. Owner/receptionist are unrestricted.
+  function staffContextOf(req) {
+    return { role: req.staff.role, doctorId: req.staff.doctorId };
+  }
+
   router.get("/", async (req, res) => {
     try {
-      const threads = await messagingSvc.listThreads(supabaseClient, req.staff.clinicId, { status: req.query.status });
+      const threads = await messagingSvc.listThreads(supabaseClient, req.staff.clinicId, {
+        status: req.query.status,
+        staffContext: staffContextOf(req),
+      });
       return ok(res, { threads });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:threads] list failed");
@@ -45,7 +55,7 @@ function createApiV1ThreadsRouter(supabaseClient, twilioClient) {
 
   router.get("/:id/messages", async (req, res) => {
     try {
-      await messagingSvc.getThread(supabaseClient, req.staff.clinicId, req.params.id);
+      await messagingSvc.getThread(supabaseClient, req.staff.clinicId, req.params.id, staffContextOf(req));
       const messages = await messagingSvc.listMessages(supabaseClient, req.params.id);
       return ok(res, { messages });
     } catch (err) {
@@ -55,7 +65,10 @@ function createApiV1ThreadsRouter(supabaseClient, twilioClient) {
   });
 
   // Doctor-only, matching the frontend's existing session.role === "doctor" gate
-  // for thread replies — now enforced server-side too.
+  // for thread replies — now enforced server-side too. sendReply's own
+  // getThread call additionally enforces that a doctor can only reply inside
+  // their own booking-scoped threads (or a general one) — this is the actual
+  // fix for "any doctor could reply to any other doctor's patient's thread".
   router.post("/:id/messages", requireRole("doctor", "owner"), async (req, res) => {
     const { body } = req.body ?? {};
     if (!body) return fail(res, 422, "MISSING_FIELDS", "body is required");
@@ -63,7 +76,7 @@ function createApiV1ThreadsRouter(supabaseClient, twilioClient) {
     try {
       const message = await messagingSvc.sendReply(
         supabaseClient,
-        { clinicId: req.staff.clinicId, threadId: req.params.id, staffId: req.staff.staffId, body },
+        { clinicId: req.staff.clinicId, threadId: req.params.id, staffId: req.staff.staffId, body, staffContext: staffContextOf(req) },
         req.log,
         twilioClient,
       );
@@ -77,7 +90,7 @@ function createApiV1ThreadsRouter(supabaseClient, twilioClient) {
   // Receptionist-only, matching the frontend's existing session.role === "receptionist" gate.
   router.post("/:id/escalate", requireRole("receptionist", "owner"), async (req, res) => {
     try {
-      const thread = await messagingSvc.escalate(supabaseClient, req.staff.clinicId, req.params.id);
+      const thread = await messagingSvc.escalate(supabaseClient, req.staff.clinicId, req.params.id, staffContextOf(req));
       return ok(res, { thread });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:threads] escalate failed");
@@ -87,7 +100,7 @@ function createApiV1ThreadsRouter(supabaseClient, twilioClient) {
 
   router.patch("/:id/read", async (req, res) => {
     try {
-      const thread = await messagingSvc.markRead(supabaseClient, req.staff.clinicId, req.params.id);
+      const thread = await messagingSvc.markRead(supabaseClient, req.staff.clinicId, req.params.id, staffContextOf(req));
       return ok(res, { thread });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:threads] mark read failed");

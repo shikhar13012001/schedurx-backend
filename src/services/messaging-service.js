@@ -18,16 +18,32 @@ function notFound(id) {
   return Object.assign(new Error(`Thread '${id}' not found`), { code: "THREAD_NOT_FOUND", statusCode: 404 });
 }
 
-async function listThreads(supabaseClient, clinicId, { status } = {}) {
+// Doctor isolation (Phase 4): owner/receptionist (or no staffContext at all
+// — internal/webhook callers) see everything, matching decision #4 from the
+// plan. A doctor sees their own booking-scoped threads (Thread.doctorId, a
+// column denormalized from the linked Appointment) plus every scope:'general'
+// thread — general threads predate this feature or were never tied to one
+// booking, so they stay a shared inbox rather than becoming invisible to
+// everyone. A doctor never sees another doctor's booking-scoped thread.
+function isVisibleToStaff(thread, staffContext) {
+  if (!staffContext || staffContext.role !== "doctor") return true;
+  if (thread.scope !== "booking" || !thread.doctorId) return true;
+  return thread.doctorId === staffContext.doctorId;
+}
+
+async function listThreads(supabaseClient, clinicId, { status, staffContext } = {}) {
   let query = supabaseClient.from("Thread").select("*").eq("clinicId", clinicId);
   if (status) query = query.eq("status", status);
 
   const { data, error } = await query.order("lastMessageAt", { ascending: false, nullsFirst: false });
   if (error) throw dbErr(`listing threads: ${error.message}`);
-  return data ?? [];
+  return (data ?? []).filter((thread) => isVisibleToStaff(thread, staffContext));
 }
 
-async function getThread(supabaseClient, clinicId, threadId) {
+// Throws THREAD_NOT_FOUND (404) — not 403 — when a thread exists but belongs
+// to a different doctor, so a probing request can't distinguish "doesn't
+// exist" from "exists but isn't yours".
+async function getThread(supabaseClient, clinicId, threadId, staffContext) {
   const { data, error } = await supabaseClient
     .from("Thread")
     .select("*")
@@ -35,7 +51,7 @@ async function getThread(supabaseClient, clinicId, threadId) {
     .eq("clinicId", clinicId)
     .maybeSingle();
   if (error) throw dbErr(`fetching thread: ${error.message}`);
-  if (!data) throw notFound(threadId);
+  if (!data || !isVisibleToStaff(data, staffContext)) throw notFound(threadId);
   return data;
 }
 
@@ -49,8 +65,8 @@ async function listMessages(supabaseClient, threadId) {
   return data ?? [];
 }
 
-async function sendReply(supabaseClient, { clinicId, threadId, staffId, body }, log, twilioClient) {
-  const thread = await getThread(supabaseClient, clinicId, threadId);
+async function sendReply(supabaseClient, { clinicId, threadId, staffId, body, staffContext }, log, twilioClient) {
+  const thread = await getThread(supabaseClient, clinicId, threadId, staffContext);
 
   let result;
   if (twilioClient) {
@@ -164,6 +180,9 @@ async function findOrCreateThread(supabaseClient, { clinicId, patientId, contact
       id: makeId("thread"),
       clinicId,
       patientId: patientId ?? null,
+      appointmentId: null,
+      doctorId: null,
+      scope: "general",
       channel,
       contactPhone,
       status: "open",
@@ -176,6 +195,45 @@ async function findOrCreateThread(supabaseClient, { clinicId, patientId, contact
     .select()
     .single();
   if (error) throw dbErr(`creating thread: ${error.message}`);
+  return data;
+}
+
+// One thread per Appointment (unlike findOrCreateThread's one-per-contact) —
+// used by webhooks-twilio.js's booking-ID deep-link fast path (Phase 4).
+// doctorId is denormalized from the Appointment for isVisibleToStaff's
+// filtering; scope:'booking' is what distinguishes it from a general thread.
+async function findOrCreateBookingThread(supabaseClient, { clinicId, appointmentId, doctorId, patientId, contactPhone, channel = "whatsapp" }) {
+  const { data: existing, error: findErr } = await supabaseClient
+    .from("Thread")
+    .select("*")
+    .eq("clinicId", clinicId)
+    .eq("appointmentId", appointmentId)
+    .maybeSingle();
+  if (findErr) throw dbErr(`finding booking thread: ${findErr.message}`);
+  if (existing) return existing;
+
+  const now = new Date().toISOString();
+  const { data, error } = await supabaseClient
+    .from("Thread")
+    .insert({
+      id: makeId("thread"),
+      clinicId,
+      patientId: patientId ?? null,
+      appointmentId,
+      doctorId: doctorId ?? null,
+      scope: "booking",
+      channel,
+      contactPhone,
+      status: "open",
+      assignedStaffId: null,
+      lastMessageAt: now,
+      unreadCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .select()
+    .single();
+  if (error) throw dbErr(`creating booking thread: ${error.message}`);
   return data;
 }
 
@@ -264,7 +322,8 @@ async function recordOutboundAiMessage(supabaseClient, { clinicId, thread, body 
   return message;
 }
 
-async function escalate(supabaseClient, clinicId, threadId) {
+async function escalate(supabaseClient, clinicId, threadId, staffContext) {
+  await getThread(supabaseClient, clinicId, threadId, staffContext); // 404s if not visible to this staff member
   const { data, error } = await supabaseClient
     .from("Thread")
     .update({ status: "escalated", updatedAt: new Date().toISOString() })
@@ -277,7 +336,8 @@ async function escalate(supabaseClient, clinicId, threadId) {
   return data;
 }
 
-async function markRead(supabaseClient, clinicId, threadId) {
+async function markRead(supabaseClient, clinicId, threadId, staffContext) {
+  await getThread(supabaseClient, clinicId, threadId, staffContext); // 404s if not visible to this staff member
   const { data, error } = await supabaseClient
     .from("Thread")
     .update({ unreadCount: 0, updatedAt: new Date().toISOString() })
@@ -297,6 +357,7 @@ module.exports = {
   sendReply,
   sendTemplatedMessage,
   findOrCreateThread,
+  findOrCreateBookingThread,
   recordInboundMessage,
   recordOutboundAiMessage,
   escalate,

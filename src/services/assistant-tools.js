@@ -16,7 +16,7 @@ const messagingSvc = require("./messaging-service");
 
 const APPOINTMENT_STATUSES = ["booked", "tentative", "cancelled", "completed", "no_show", "blocked"];
 
-function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinicId, staffId, timezone, reminderDoctor, log }) {
+function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinicId, staffId, staffContext, timezone, reminderDoctor, log }) {
   return {
     list_appointments: tool({
       description:
@@ -278,7 +278,7 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
       }),
       execute: async ({ onlyUnread }) => {
         try {
-          const threads = await messagingSvc.listThreads(supabaseClient, clinicId, {});
+          const threads = await messagingSvc.listThreads(supabaseClient, clinicId, { staffContext });
           const open = threads.filter((t) => t.status !== "closed" && (!onlyUnread || t.unreadCount > 0));
           const patientIds = [...new Set(open.map((t) => t.patientId).filter(Boolean))];
           const namesById = new Map();
@@ -316,7 +316,7 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
           const patient = patients[0];
           if (!patient.contactNumber) return { sent: false, error: `${patient.fullName} has no phone number on file.` };
 
-          const threads = await messagingSvc.listThreads(supabaseClient, clinicId, {});
+          const threads = await messagingSvc.listThreads(supabaseClient, clinicId, { staffContext });
           const openWhatsapp = threads.find((t) => t.patientId === patient.id && t.channel === "whatsapp" && t.status !== "closed");
           const thread =
             openWhatsapp ??
@@ -327,7 +327,7 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
               channel: "sms",
             }));
 
-          const sentMessage = await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body: message }, log, twilioClient);
+          const sentMessage = await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body: message, staffContext }, log, twilioClient);
           return { sent: true, channel: thread.channel, patientName: patient.fullName, messageId: sentMessage.id };
         } catch (err) {
           return { sent: false, error: err.message };
@@ -408,7 +408,7 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
                 contactPhone: patient.contactNumber,
                 channel: "sms",
               });
-              await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body }, log, twilioClient);
+              await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body, staffContext }, log, twilioClient);
               notified++;
             } catch {
               failed.push(patient.fullName);
