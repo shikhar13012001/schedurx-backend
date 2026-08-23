@@ -8,6 +8,7 @@ const stripeSvc = require("../services/stripe-service");
 const invoiceSvc = require("../services/invoice-service");
 const stripeSubSvc = require("../services/stripe-subscription-service");
 const notificationSvc = require("../services/notification-service");
+const appointmentSvc = require("../services/appointment-service");
 const { config } = require("../config");
 
 // Both checkout.session.completed (one-off Invoice payment) and
@@ -28,7 +29,7 @@ async function resolveClinicIdForSubscription(supabaseClient, subscription) {
   return data?.id ?? null;
 }
 
-function createStripeWebhookRouter(supabaseClient, stripeClient) {
+function createStripeWebhookRouter(supabaseClient, stripeClient, twilioClient) {
   const router = Router();
 
   router.post("/", raw({ type: "application/json" }), async (req, res) => {
@@ -43,12 +44,25 @@ function createStripeWebhookRouter(supabaseClient, stripeClient) {
 
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
-      // mode:"subscription" sessions have no matching Invoice row (only
-      // mode:"payment" ones do — see stripe-service.js's createCheckoutSession
-      // vs. stripe-subscription-service.js's createSubscriptionCheckoutSession)
-      // — markPaidByStripeSession no-ops harmlessly for those, but skipping
-      // the call entirely avoids a pointless write attempt.
-      if (session.mode !== "subscription") {
+      if (session.metadata?.pendingBookingId) {
+        // Pay-first token booking (Phase 3) — turns the held slot into a
+        // real Appointment. Idempotent on the PendingBooking's own status,
+        // so a Stripe retry of this same event is safe.
+        try {
+          await appointmentSvc.finalizePendingBooking(supabaseClient, session.metadata.pendingBookingId, req.log, twilioClient);
+        } catch (err) {
+          req.log?.error(
+            { err, pendingBookingId: session.metadata.pendingBookingId },
+            "[stripe-webhook] failed to finalize pending token booking",
+          );
+          // Still 200 — same reconciliation-over-retry reasoning as the branches below.
+        }
+      } else if (session.mode !== "subscription") {
+        // mode:"subscription" sessions have no matching Invoice row (only
+        // mode:"payment" ones do — see stripe-service.js's createCheckoutSession
+        // vs. stripe-subscription-service.js's createSubscriptionCheckoutSession)
+        // — markPaidByStripeSession no-ops harmlessly for those, but skipping
+        // the call entirely avoids a pointless write attempt.
         try {
           await invoiceSvc.markPaidByStripeSession(supabaseClient, session.id, session.payment_intent);
         } catch (err) {

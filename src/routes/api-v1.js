@@ -46,7 +46,7 @@ function createApiV1Router({
 
   router.get("/me", (req, res) => ok(res, { staff: req.staff }));
 
-  router.use("/appointments", createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient));
+  router.use("/appointments", createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient, stripeClient));
   router.use("/clinic", createApiV1ClinicRouter(supabaseClient));
   router.use("/patients", createApiV1PatientsRouter(supabaseClient));
   router.use("/team", createApiV1TeamRouter(supabaseClient, twilioClient));

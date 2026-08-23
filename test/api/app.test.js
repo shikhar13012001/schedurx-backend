@@ -495,6 +495,245 @@ test("GET /api/v1/appointments scopes strictly to the authenticated staff member
   });
 });
 
+// ─── Pay-first token payments (Phase 3) ─────────────────────────────────────
+
+function tokenClinicRow(overrides = {}) {
+  return {
+    id: "clinic-1",
+    status: "active",
+    schedulerServiceId: "svc-1",
+    timezone: "Asia/Kolkata",
+    workingDays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    openingHour: 9,
+    closingHour: 18,
+    defaultAppointmentDurationMins: 30,
+    bufferMins: 5,
+    minNoticeHours: 0,
+    maxBookingWindowDays: 30,
+    cancellationCutoffHours: 0,
+    rescheduleCutoffHours: 0,
+    tokenMoneyEnabled: true,
+    tokenAmountPaise: 20000,
+    settings: {},
+    ...overrides,
+  };
+}
+
+function tokenDoctorRow(overrides = {}) {
+  return {
+    id: "doc-1",
+    clinicId: "clinic-1",
+    fullName: "Dr. Priya",
+    isActive: true,
+    schedulerDoctorId: "n-doc-1",
+    schedulerCalendarId: "n-cal-1",
+    ...overrides,
+  };
+}
+
+function makeTokenNettuStub() {
+  return {
+    async createEvent() {
+      return { id: "nettu-event-token-1" };
+    },
+    async deleteEvent() {
+      return { id: "nettu-event-token-1" };
+    },
+  };
+}
+
+const TOKEN_FUTURE_START = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+test("POST /api/v1/appointments with tokenRequested holds the slot, sends the payment link on WhatsApp, and does not book immediately", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "receptionist", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [tokenClinicRow()],
+    Doctor: [tokenDoctorRow()],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({
+    supabaseClient,
+    nettuClient: makeTokenNettuStub(),
+    firebaseAdminApp,
+    stripeClient: createStripeStub({ session: { id: "cs_token_1", url: "https://checkout.stripe.com/token_1" } }),
+    openaiClient: null,
+    twilioClient,
+  });
+
+  await withServer(app, async ({ request }) => {
+    // Deliberately no successUrl/cancelUrl in the request — it's the patient
+    // who visits Stripe (via the WhatsApp link), never the receptionist's
+    // own browser, so this route builds its own redirect URLs.
+    const response = await request("/api/v1/appointments", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        doctorId: "doc-1",
+        start: TOKEN_FUTURE_START,
+        patient: { phone: "+919999999999", name: "Test Patient" },
+        tokenRequested: true,
+      }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/token_1");
+    assert.equal(body.data.amountPaise, 20000);
+    assert.equal(body.data.tokenLinkSent, true);
+    assert.ok(body.data.pendingBookingId.startsWith("pbk_"));
+  });
+
+  assert.equal((supabaseClient._tables.Appointment ?? []).length, 0, "no Appointment must exist until Stripe confirms payment");
+  assert.equal(supabaseClient._tables.PendingBooking.length, 1);
+  assert.equal(twilioClient.calls.sendWhatsApp.length, 1);
+  assert.match(twilioClient.calls.sendWhatsApp[0].body, /checkout\.stripe\.com\/token_1/);
+});
+
+test("POST /api/v1/appointments with tokenRequested still returns the checkout URL when the WhatsApp send fails", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "receptionist", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [tokenClinicRow()],
+    Doctor: [tokenDoctorRow()],
+  });
+  const twilioClient = createTwilioStub({ shouldFailWhatsApp: true });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: makeTokenNettuStub(),
+    firebaseAdminApp,
+    stripeClient: createStripeStub({ session: { id: "cs_token_1", url: "https://checkout.stripe.com/token_1" } }),
+    openaiClient: null,
+    twilioClient,
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/appointments", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        doctorId: "doc-1",
+        start: TOKEN_FUTURE_START,
+        patient: { phone: "+919999999999", name: "Test Patient" },
+        tokenRequested: true,
+      }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/token_1");
+    assert.equal(body.data.tokenLinkSent, false);
+  });
+});
+
+test("POST /api/v1/public/appointments auto-routes to token checkout when the clinic requires a token, without the client asking for it", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [tokenClinicRow()],
+    Doctor: [tokenDoctorRow()],
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: makeTokenNettuStub(),
+    stripeClient: createStripeStub({ session: { id: "cs_token_2", url: "https://checkout.stripe.com/token_2" } }),
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/public/appointments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        start: TOKEN_FUTURE_START,
+        patient: { phone: "9999999999", fullName: "Test Patient" },
+        successUrl: "https://patient-app/success",
+        cancelUrl: "https://patient-app/cancel",
+      }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/token_2");
+  });
+
+  assert.equal((supabaseClient._tables.Appointment ?? []).length, 0);
+});
+
+test("POST /api/v1/public/appointments books immediately when the clinic does not require a token", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [tokenClinicRow({ tokenMoneyEnabled: false, tokenAmountPaise: null })],
+    Doctor: [tokenDoctorRow()],
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: makeTokenNettuStub(),
+    stripeClient: null,
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/public/appointments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        start: TOKEN_FUTURE_START,
+        patient: { phone: "9999999999", fullName: "Test Patient" },
+      }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 201);
+    assert.equal(body.data.appointment.status, "booked");
+  });
+
+  assert.equal(supabaseClient._tables.Appointment.length, 1);
+});
+
+test("POST /webhooks/stripe checkout.session.completed with a pendingBookingId finalizes the held slot into a real Appointment", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [tokenClinicRow()],
+    Doctor: [tokenDoctorRow()],
+    PendingBooking: [
+      {
+        id: "pbk_1",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        appointmentId: "apt_from_pending",
+        schedulerEventId: "nettu-event-token-1",
+        timeslot: TOKEN_FUTURE_START,
+        durationMinutes: 30,
+        amountPaise: 20000,
+        bookingParams: { patientId: null, patient: { name: "Test Patient", phone: "+919999999999" }, source: "patient_web" },
+        status: "pending",
+      },
+    ],
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    stripeClient: createStripeStub({
+      event: {
+        type: "checkout.session.completed",
+        data: { object: { id: "cs_token_3", mode: "payment", metadata: { pendingBookingId: "pbk_1" } } },
+      },
+    }),
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/stripe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "stripe-signature": "valid" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.equal(supabaseClient._tables.Appointment.length, 1);
+  assert.equal(supabaseClient._tables.Appointment[0].id, "apt_from_pending");
+  assert.equal(supabaseClient._tables.PendingBooking[0].status, "completed");
+});
+
 function makeReschedulableNettuStub() {
   return {
     async createEvent() {

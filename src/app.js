@@ -59,7 +59,7 @@ function createApp({
   // so it's mounted (with its own express.raw() parser, applied inside the
   // router itself) BEFORE express.json() below ever runs on the request.
   if (stripeClient) {
-    app.use("/webhooks/stripe", createStripeWebhookRouter(supabaseClient, stripeClient));
+    app.use("/webhooks/stripe", createStripeWebhookRouter(supabaseClient, stripeClient, twilioClient));
   }
 
   // Twilio's signature check needs the parsed application/x-www-form-urlencoded
@@ -188,7 +188,7 @@ function createApp({
         }),
       );
     }
-    app.use("/api/v1/public", createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient));
+    app.use("/api/v1/public", createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient, stripeClient));
   }
 
   // Dashboard REST API — the browser-facing surface, so CORS applies here only

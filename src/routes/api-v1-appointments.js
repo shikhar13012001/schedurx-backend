@@ -3,13 +3,16 @@ const { ok, fail } = require("../lib/response-envelope");
 const tableSvc = require("../services/table-service");
 const appointmentSvc = require("../services/appointment-service");
 const availabilitySvc = require("../services/availability-service");
+const clinicSvc = require("../services/clinic-service");
+const stripeSvc = require("../services/stripe-service");
+const { config } = require("../config");
 
 // GET /api/v1/appointments?date=YYYY-MM-DD&doctorId=... — clinicId always comes
 // from req.staff (set by firebaseAuth), never from the query string.
 // POST /api/v1/appointments — dashboard booking (reuses the same bookAppointment()
 // the voice-agent tool uses, so nettu-scheduler conflict detection/booking-window
 // rules apply identically regardless of who's booking).
-function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient) {
+function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient, stripeClient) {
   const router = Router();
 
   router.get("/", async (req, res) => {
@@ -69,6 +72,77 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
         age: patient.age,
         gender: patient.gender,
       });
+
+      // Pay-first token booking (Phase 3): reserve the slot + hold the
+      // booking details, and only write the real Appointment once
+      // stripe-webhook.js confirms payment — no Appointment (and no
+      // "booking confirmed" message) exists yet. It's the PATIENT who pays,
+      // not the receptionist sitting at this dashboard — the checkout link
+      // is sent to the patient's own WhatsApp, matching the UI copy this
+      // toggle has always shown ("payment link on WhatsApp"), never a
+      // browser redirect for the staff member submitting this form.
+      if (tokenRequested) {
+        if (!stripeClient) return fail(res, 503, "STRIPE_NOT_CONFIGURED", "STRIPE_SECRET_KEY is not set");
+
+        const pending = await appointmentSvc.createPendingTokenBooking(
+          nettuClient,
+          supabaseClient,
+          {
+            clinicId: req.staff.clinicId,
+            doctorId,
+            patientId: patientRow.id,
+            start,
+            end,
+            patient: { name: patientRow.fullName, phone: patientRow.contactNumber },
+            reason,
+            notes,
+            bookerRelation,
+            proxyName,
+            mode,
+            source: "reception",
+          },
+          req.log,
+          twilioClient,
+        );
+
+        const clinic = await clinicSvc.getClinic(supabaseClient, req.staff.clinicId);
+        const fallbackBase = config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${req.staff.clinicId}/${pending.appointmentId}` : null;
+        const session = await stripeSvc.createTokenCheckoutSession(stripeClient, {
+          pendingBookingId: pending.pendingBookingId,
+          amountPaise: pending.amountPaise,
+          clinicId: req.staff.clinicId,
+          clinicName: clinic?.name,
+          successUrl: fallbackBase ? `${fallbackBase}?paid=1` : "https://schedurx.com/booked",
+          cancelUrl: fallbackBase ? `${fallbackBase}?paid=0` : "https://schedurx.com/booked",
+        });
+
+        let tokenLinkSent = false;
+        if (twilioClient && patientRow.contactNumber) {
+          try {
+            await twilioClient.sendWhatsApp({
+              to: patientRow.contactNumber,
+              body: `Hi ${patientRow.fullName || "there"}, please complete your ₹${Math.round(pending.amountPaise / 100)} booking payment to confirm your appointment at ${clinic?.name ?? "the clinic"}: ${session.url}`,
+            });
+            tokenLinkSent = true;
+          } catch (err) {
+            // Free-text WhatsApp only delivers inside an open 24h session
+            // window (see comms-workflow-service.js) — no approved Content
+            // Template exists yet for an ad-hoc payment link, so this can
+            // legitimately fail. checkoutUrl is still returned below so
+            // staff can share it manually (copy/SMS/call).
+            req.log?.warn({ err, pendingBookingId: pending.pendingBookingId }, "[api-v1:appointments] token payment WhatsApp link failed to send");
+          }
+        }
+
+        return ok(res, {
+          pendingBookingId: pending.pendingBookingId,
+          checkoutUrl: session.url,
+          sessionId: session.id,
+          amountPaise: pending.amountPaise,
+          tokenLinkSent,
+          patient: patientRow,
+        });
+      }
 
       const appointment = await appointmentSvc.bookAppointment(
         nettuClient,

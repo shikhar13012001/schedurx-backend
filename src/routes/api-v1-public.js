@@ -21,6 +21,8 @@ const tableSvc = require("../services/table-service");
 const clinicSvc = require("../services/clinic-service");
 const appointmentSvc = require("../services/appointment-service");
 const availabilitySvc = require("../services/availability-service");
+const stripeSvc = require("../services/stripe-service");
+const { config } = require("../config");
 const { normalizeIndianMobile } = require("../lib/phone");
 
 // Ported from schedurx-form-agent's own POST /api/intake, which validated
@@ -51,7 +53,7 @@ function publicClinicView(clinic, doctors) {
   };
 }
 
-function createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient) {
+function createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient, stripeClient) {
   const router = Router();
   const limiter = createRateLimiter({ windowMs: 60_000, max: 10 });
   router.use(limiter);
@@ -100,7 +102,7 @@ function createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient) {
   router.post("/appointments", async (req, res) => {
     if (!nettuClient) return fail(res, 503, "SCHEDULER_NOT_CONFIGURED", "Calendar scheduling is not configured");
 
-    const { clinicId, doctorId, start, end, patient, reason, notes, bookerRelation, proxyName } = req.body ?? {};
+    const { clinicId, doctorId, start, end, patient, reason, notes, bookerRelation, proxyName, successUrl, cancelUrl } = req.body ?? {};
     if (!clinicId || !doctorId || !start || !patient?.phone) {
       return fail(res, 422, "MISSING_FIELDS", "clinicId, doctorId, start, and patient.phone are required");
     }
@@ -114,6 +116,63 @@ function createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient) {
         age: patient.age,
         gender: patient.gender,
       });
+
+      // Pay-first token payments (Phase 3): whether a token is required is
+      // the clinic's own configured policy (Clinic.tokenMoneyEnabled/
+      // tokenAmountPaise, set in clinic settings) — never a client-supplied
+      // flag, so a patient can't just omit it to skip payment.
+      const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
+      if (clinic?.tokenMoneyEnabled && clinic?.tokenAmountPaise) {
+        if (!stripeClient) return fail(res, 503, "STRIPE_NOT_CONFIGURED", "This clinic requires a token payment, but billing isn't set up yet — please call the clinic to book");
+
+        // schedurx-form-agent (a separate repo) can pass its own thank-you/
+        // cancel page URLs; falls back to this backend's own confirmation
+        // page (built for exactly this — see GET /appointments/:id below) so
+        // booking still works end-to-end before that repo is updated to pass
+        // them explicitly.
+        const fallbackBase = config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}` : null;
+        const finalSuccessUrl = successUrl ?? (fallbackBase ? `${fallbackBase}/pending?paid=1` : null);
+        const finalCancelUrl = cancelUrl ?? (fallbackBase ? `${fallbackBase}/pending?paid=0` : null);
+        if (!finalSuccessUrl || !finalCancelUrl) {
+          return fail(res, 422, "MISSING_FIELDS", "successUrl and cancelUrl are required (PATIENT_APP_BASE_URL is not configured as a fallback)");
+        }
+
+        const pending = await appointmentSvc.createPendingTokenBooking(
+          nettuClient,
+          supabaseClient,
+          {
+            clinicId,
+            doctorId,
+            patientId: patientRow.id,
+            start,
+            end,
+            patient: { name: patientRow.fullName, phone: patientRow.contactNumber },
+            reason,
+            notes,
+            bookerRelation,
+            proxyName,
+            source: "patient_web",
+          },
+          req.log,
+          twilioClient,
+        );
+
+        const session = await stripeSvc.createTokenCheckoutSession(stripeClient, {
+          pendingBookingId: pending.pendingBookingId,
+          amountPaise: pending.amountPaise,
+          clinicId,
+          clinicName: clinic.name,
+          successUrl: finalSuccessUrl,
+          cancelUrl: finalCancelUrl,
+        });
+
+        return ok(res, {
+          pendingBookingId: pending.pendingBookingId,
+          checkoutUrl: session.url,
+          amountPaise: pending.amountPaise,
+          patient: patientRow,
+        });
+      }
 
       const appointment = await appointmentSvc.bookAppointment(
         nettuClient,

@@ -59,23 +59,25 @@ function buildAuditEntry(action, { actor, reason, oldStart, newStart, oldEnd, ne
 // twilioClient is optional (trailing) — omit it and this behaves exactly as
 // before (no patient-facing messaging), matching every other integration's
 // "absent client → feature quietly no-ops" convention in this codebase.
-async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioClient) {
+//
+// Split into validateAndReserveSlot (Phase 3: everything up to and including
+// the nettu-scheduler busy event — the part a pay-first token booking must
+// do immediately, before payment, so nobody else can take the slot while a
+// patient is on Stripe's checkout page) and persistAppointment (the Postgres
+// write + patient-facing comms, done once a booking is actually confirmed —
+// immediately for a normal booking, or later via finalizePendingBooking once
+// Stripe confirms). bookAppointment itself is now just those two in
+// sequence, unchanged in behavior for every existing caller.
+async function validateAndReserveSlot(nettuClient, supabaseClient, opts, log, twilioClient) {
   const {
     clinicId,
     doctorId,
-    patientId,
     start,
     end,
-    patient,
-    appointmentType,
     reason,
     source = "system",
-    bookerRelation = "self",
-    proxyName,
-    notes,
     status = "booked",
     mode = "clinic",
-    tokenRequested = false,
   } = opts;
 
   if (!["clinic", "video", "audio", "text"].includes(mode)) {
@@ -161,7 +163,6 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
   // the event's metadata — the reminder webhook only gets the CalendarEvent
   // back, not our own request context, so this is how it knows which
   // Appointment/Notification to create.
-  const now = new Date().toISOString();
   const appointmentId = `apt_${crypto.randomUUID()}`;
 
   // Create a busy calendar event in nettu (marks slot as taken).
@@ -206,16 +207,49 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
     });
   }
 
-  // Persist to Supabase.
+  return {
+    clinic,
+    doctor,
+    timezone,
+    startMs,
+    endMs,
+    durationMs,
+    isBlocked,
+    appointmentId,
+    nettuEvent,
+  };
+}
+
+// Writes the Postgres Appointment row for an already-reserved slot and sends
+// the booking-confirmed comms — the part that happens immediately for a
+// normal booking, or later (via finalizePendingBooking) once Stripe confirms
+// a pay-first token payment. opts here is the same shape bookAppointment
+// always took; only the fields persistAppointment itself needs are read.
+async function persistAppointment(supabaseClient, reservation, opts, log, twilioClient) {
+  const { clinic, doctor, timezone, startMs, endMs, durationMs, isBlocked, appointmentId, nettuEvent } = reservation;
+  const {
+    patientId,
+    patient,
+    reason,
+    notes,
+    source = "system",
+    bookerRelation = "self",
+    proxyName,
+    status = "booked",
+    mode = "clinic",
+    tokenRequested = false,
+  } = opts;
+
+  const now = new Date().toISOString();
   const auditEntry = buildAuditEntry("created", { actor: source, reason });
 
   const { data: appointment, error } = await supabaseClient
     .from("Appointment")
     .insert({
       id: appointmentId,
-      clinicId,
+      clinicId: clinic.id,
       patientId: patientId ?? null,
-      doctorId,
+      doctorId: doctor.id,
       // A genuine UTC instant, not the raw client string — `timeslot` is a
       // legacy `timestamp without time zone` column (see lib/dates.js), and
       // Postgres silently DISCARDS an offset like "+05:30" on write to such
@@ -249,13 +283,13 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
   if (error) {
     // DB failed after the nettu event was created — log for manual reconciliation.
     log?.error(
-      { err: error, nettuEventId: nettuEvent?.id, clinicId, doctorId },
+      { err: error, nettuEventId: nettuEvent?.id, clinicId: clinic.id, doctorId: doctor.id },
       "[appointmentSvc] DB insert failed after nettu event created — manual reconciliation needed",
     );
     throw Object.assign(new Error("Database error saving appointment"), { code: "DATABASE_ERROR", statusCode: 500 });
   }
 
-  log?.info({ appointmentId, nettuEventId: nettuEvent?.id, doctorId, clinicId }, "[appointmentSvc] appointment booked");
+  log?.info({ appointmentId, nettuEventId: nettuEvent?.id, doctorId: doctor.id, clinicId: clinic.id }, "[appointmentSvc] appointment booked");
 
   if (!isBlocked && patient?.phone) {
     await commsWorkflowSvc.sendImmediateWorkflowMessages(
@@ -272,11 +306,11 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
           doctorName: doctor.fullName,
           patientName: patient.name,
           apptTime: formatHumanTime(startMs, timezone),
-          bookingUrl: bookingUrlFor(clinicId, appointmentId),
+          bookingUrl: bookingUrlFor(clinic.id, appointmentId),
           // Suffix-only form of bookingUrl, for Content Template URL buttons —
           // Meta/Twilio only allow a variable at the end of an already-fixed
           // base URL on a button component, never the whole URL as one variable.
-          bookingUrlPath: `${clinicId}/${appointmentId}`,
+          bookingUrlPath: `${clinic.id}/${appointmentId}`,
         },
       },
       log,
@@ -296,6 +330,184 @@ async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioCli
     patient: { name: patient?.name ?? null, phone: patient?.phone ?? null },
     source: appointment.source,
   };
+}
+
+async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioClient) {
+  const reservation = await validateAndReserveSlot(nettuClient, supabaseClient, opts, log, twilioClient);
+  return persistAppointment(supabaseClient, reservation, opts, log, twilioClient);
+}
+
+// ─── Pay-first token payments (Phase 3) ────────────────────────────────────
+
+const PENDING_BOOKING_TTL_MINUTES = 20;
+
+// Reserves the slot (a real nettu busy event — see validateAndReserveSlot)
+// and parks the booking details in PendingBooking instead of writing an
+// Appointment row. The caller (a route) is expected to build a Stripe
+// Checkout Session with metadata.pendingBookingId = the returned id;
+// finalizePendingBooking turns this into a real Appointment once Stripe
+// confirms payment. Throws TOKEN_AMOUNT_NOT_CONFIGURED if the clinic has no
+// tokenAmountPaise set — callers should only reach this function once
+// they've confirmed a token is actually being requested.
+async function createPendingTokenBooking(nettuClient, supabaseClient, opts, log, twilioClient) {
+  const reservation = await validateAndReserveSlot(nettuClient, supabaseClient, opts, log, twilioClient);
+  const { clinic, doctor, startMs, durationMs, appointmentId, nettuEvent } = reservation;
+
+  const amountPaise = clinic.tokenAmountPaise;
+  if (!amountPaise) {
+    throw Object.assign(new Error(`Clinic '${clinic.id}' has no token amount configured`), {
+      code: "TOKEN_AMOUNT_NOT_CONFIGURED",
+      statusCode: 422,
+    });
+  }
+
+  const {
+    patientId,
+    patient,
+    appointmentType,
+    reason,
+    notes,
+    source = "system",
+    bookerRelation = "self",
+    proxyName,
+    mode = "clinic",
+  } = opts;
+  const bookingParams = { patientId, patient, appointmentType, reason, notes, source, bookerRelation, proxyName, mode };
+
+  const now = new Date().toISOString();
+  const { data, error } = await supabaseClient
+    .from("PendingBooking")
+    .insert({
+      id: `pbk_${crypto.randomUUID()}`,
+      clinicId: clinic.id,
+      doctorId: doctor.id,
+      appointmentId,
+      schedulerEventId: nettuEvent?.id ?? null,
+      timeslot: new Date(startMs).toISOString(),
+      durationMinutes: Math.round(durationMs / 60_000),
+      amountPaise,
+      bookingParams,
+      status: "pending",
+      expiresAt: new Date(Date.now() + PENDING_BOOKING_TTL_MINUTES * 60_000).toISOString(),
+      createdAt: now,
+      updatedAt: now,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    // The nettu hold is already live at this point — left in place
+    // deliberately rather than best-effort-deleted here: expirePendingBookings
+    // can't clean up a row that was never written, but nettu's own event
+    // will simply sit unclaimed until a human notices via reconciliation
+    // logs, same "log for manual reconciliation" posture as persistAppointment's
+    // DB-failure branch above.
+    log?.error(
+      { err: error, appointmentId, nettuEventId: nettuEvent?.id },
+      "[appointmentSvc] DB insert failed for pending token booking — nettu hold left in place",
+    );
+    throw Object.assign(new Error("Database error saving pending booking"), { code: "DATABASE_ERROR", statusCode: 500 });
+  }
+
+  return { pendingBookingId: data.id, amountPaise, expiresAt: data.expiresAt, appointmentId };
+}
+
+// Called from stripe-webhook.js once Stripe confirms a token payment
+// (checkout.session.completed with metadata.pendingBookingId). Idempotent —
+// a Stripe retry, or a webhook firing twice, just no-ops the second time
+// since the row is no longer status:"pending". Returns null (never throws)
+// for an unknown id or a non-pending row, matching invoice-service.js's
+// markPaidByStripeSession "defensive, never throws in a webhook path" shape.
+async function finalizePendingBooking(supabaseClient, pendingBookingId, log, twilioClient) {
+  const { data: pending, error } = await supabaseClient
+    .from("PendingBooking")
+    .select("*")
+    .eq("id", pendingBookingId)
+    .maybeSingle();
+  if (error) throw Object.assign(new Error(`DB error: ${error.message}`), { code: "DATABASE_ERROR", statusCode: 500 });
+  if (!pending) {
+    log?.warn({ pendingBookingId }, "[appointmentSvc] finalizePendingBooking: unknown id");
+    return null;
+  }
+  if (pending.status !== "pending") {
+    log?.info({ pendingBookingId, status: pending.status }, "[appointmentSvc] finalizePendingBooking: not pending, skipping");
+    return null;
+  }
+
+  const clinic = await clinicSvc.requireActiveClinic(supabaseClient, pending.clinicId);
+  const doctor = await doctorSvc.requireActiveDoctor(supabaseClient, pending.doctorId, pending.clinicId);
+  const clinicRules = clinicSvc.getSchedulingRules(clinic);
+  const doctorRules = doctorSvc.getSchedulingRules(doctor, clinicRules);
+  const timezone = doctorRules.timezone;
+  const startMs = new Date(pending.timeslot).getTime();
+  const durationMs = pending.durationMinutes * 60_000;
+
+  const reservation = {
+    clinic,
+    doctor,
+    timezone,
+    startMs,
+    endMs: startMs + durationMs,
+    durationMs,
+    isBlocked: false,
+    appointmentId: pending.appointmentId,
+    nettuEvent: { id: pending.schedulerEventId },
+  };
+
+  const appointment = await persistAppointment(
+    supabaseClient,
+    reservation,
+    { ...pending.bookingParams, status: "booked", tokenRequested: true },
+    log,
+    twilioClient,
+  );
+
+  await supabaseClient
+    .from("PendingBooking")
+    .update({ status: "completed", updatedAt: new Date().toISOString() })
+    .eq("id", pendingBookingId);
+
+  return appointment;
+}
+
+// Run periodically (see server.js) — releases the nettu hold and marks any
+// PendingBooking whose payment window lapsed without completing, so an
+// abandoned Stripe checkout doesn't keep a slot locked forever.
+async function expirePendingBookings(nettuClient, supabaseClient, log) {
+  const { data: expired, error } = await supabaseClient
+    .from("PendingBooking")
+    .select("*")
+    .eq("status", "pending")
+    .lt("expiresAt", new Date().toISOString());
+  if (error) {
+    log?.error({ err: error }, "[appointmentSvc] expirePendingBookings: failed to list expired rows");
+    return { expiredCount: 0 };
+  }
+
+  let expiredCount = 0;
+  for (const row of expired ?? []) {
+    if (row.schedulerEventId) {
+      try {
+        const { data: doctor } = await supabaseClient
+          .from("Doctor")
+          .select("schedulerDoctorId")
+          .eq("id", row.doctorId)
+          .maybeSingle();
+        if (doctor?.schedulerDoctorId) {
+          await nettuClient.deleteEvent(doctor.schedulerDoctorId, row.schedulerEventId);
+        }
+      } catch (err) {
+        log?.warn({ err, pendingBookingId: row.id }, "[appointmentSvc] expirePendingBookings: couldn't delete nettu hold — continuing");
+      }
+    }
+    const { error: updateErr } = await supabaseClient
+      .from("PendingBooking")
+      .update({ status: "expired", updatedAt: new Date().toISOString() })
+      .eq("id", row.id);
+    if (!updateErr) expiredCount += 1;
+  }
+  if (expiredCount) log?.info({ expiredCount }, "[appointmentSvc] expired stale pending token bookings");
+  return { expiredCount };
 }
 
 // ─── Reschedule ───────────────────────────────────────────────────────────────
@@ -751,4 +963,15 @@ async function cancelAppointments(nettuClient, supabaseClient, opts, log, twilio
   return summarizeBulkResults(results);
 }
 
-module.exports = { bookAppointment, rescheduleAppointment, cancelAppointment, rescheduleAppointments, cancelAppointments };
+module.exports = {
+  bookAppointment,
+  rescheduleAppointment,
+  cancelAppointment,
+  rescheduleAppointments,
+  cancelAppointments,
+  validateAndReserveSlot,
+  persistAppointment,
+  createPendingTokenBooking,
+  finalizePendingBooking,
+  expirePendingBookings,
+};

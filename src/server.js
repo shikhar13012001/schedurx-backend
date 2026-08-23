@@ -190,6 +190,18 @@ async function start() {
     logger.info({ port: config.PORT }, "Server listening");
   });
 
+  // Pay-first token bookings (Phase 3) hold a real nettu-scheduler slot the
+  // moment checkout starts — if a patient abandons Stripe's payment page,
+  // nothing else would ever release that hold. .unref() so this timer alone
+  // never keeps the process alive (process.exit() in registerShutdownHandlers
+  // below already terminates unconditionally regardless of pending timers).
+  const appointmentSvc = require("./services/appointment-service");
+  setInterval(() => {
+    appointmentSvc.expirePendingBookings(nettuClient, supabaseClient, logger).catch((err) => {
+      logger.error({ err }, "[startup] expirePendingBookings tick failed");
+    });
+  }, 5 * 60_000).unref();
+
   registerShutdownHandlers(server);
 }
 
