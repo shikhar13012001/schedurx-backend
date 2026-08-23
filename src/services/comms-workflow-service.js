@@ -45,6 +45,16 @@ const { formatHumanTime } = require("./availability-service");
 const IMMEDIATE_TRIGGERS = new Set(["booking_confirmed", "reschedule", "cancellation"]);
 const DELAYED_TRIGGERS = new Set(["reminder", "pre_appointment", "post_appointment", "review_request"]);
 
+// wa.me deep link into this booking's own Thread (Phase 4's booking-ID fast
+// path in webhooks-twilio.js) — the {{textCommsUrl}} a workflow template can
+// reference. null when the clinic has no WhatsApp sender configured at all,
+// same "quietly omit, don't break the send" posture as bookingUrlFor in
+// appointment-service.js.
+function buildTextCommsUrl(clinic, appointmentId) {
+  const digits = clinic?.whatsappFrom?.replace(/\D/g, "");
+  return digits ? `https://wa.me/${digits}?text=${encodeURIComponent(`BOOKING ${appointmentId}`)}` : null;
+}
+
 function enabledWorkflowsFor(clinic, triggers) {
   const comms = clinic?.settings?.communication ?? {};
   const channelsEnabled = comms.channelsEnabled ?? [];
@@ -146,7 +156,12 @@ async function sendImmediateWorkflowMessages(
 ) {
   if (!twilioClient || !toPhone || !IMMEDIATE_TRIGGERS.has(trigger)) return;
   const workflows = enabledWorkflowsFor(clinic, new Set([trigger]));
-  const fullData = { ...data, clinicWhatsappFrom: clinic?.whatsappFrom };
+  const fullData = {
+    ...data,
+    clinicWhatsappFrom: clinic?.whatsappFrom,
+    reviewUrl: clinic?.googleReviewUrl ?? null,
+    textCommsUrl: buildTextCommsUrl(clinic, appointmentId),
+  };
   for (const workflow of workflows) {
     await sendAndTrack({ supabaseClient, twilioClient, workflow, appointmentId, toPhone, data: fullData }, log);
   }
@@ -205,6 +220,8 @@ async function sendDelayedWorkflowMessage({ supabaseClient, twilioClient, clinic
     apptTime: appointment.timeslot ? formatHumanTime(new Date(appointment.timeslot).getTime(), timezone) : null,
     symptoms: appointment.symptoms,
     clinicWhatsappFrom: clinic?.whatsappFrom,
+    reviewUrl: clinic?.googleReviewUrl ?? null,
+    textCommsUrl: buildTextCommsUrl(clinic, appointmentId),
   };
   await sendAndTrack(
     { supabaseClient, twilioClient, workflow, appointmentId, toPhone: patient.contactNumber, data },
@@ -212,4 +229,4 @@ async function sendDelayedWorkflowMessage({ supabaseClient, twilioClient, clinic
   );
 }
 
-module.exports = { buildDelayedReminderEntries, sendImmediateWorkflowMessages, sendDelayedWorkflowMessage };
+module.exports = { buildDelayedReminderEntries, sendImmediateWorkflowMessages, sendDelayedWorkflowMessage, buildTextCommsUrl };

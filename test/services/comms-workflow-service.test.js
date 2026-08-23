@@ -199,6 +199,34 @@ describe("sendImmediateWorkflowMessages", () => {
     assert.equal(twilioClient.calls.sendSms.length, 0);
   });
 
+  // Phase 7: {{reviewUrl}}/{{textCommsUrl}} are now real data keys any
+  // workflow template can reference — reviewUrl from Clinic.googleReviewUrl,
+  // textCommsUrl a wa.me deep link into this booking's own Thread.
+  test("includes reviewUrl/textCommsUrl so a workflow template can reference them", async () => {
+    const supabaseClient = createTableStub();
+    const twilioClient = createTwilioStub();
+    const clinic = makeClinic({
+      googleReviewUrl: "https://g.page/r/nirmaya-clinic/review",
+      whatsappFrom: "+14155238886",
+      settings: {
+        communication: {
+          channelsEnabled: ["sms"],
+          workflows: [
+            { id: "review-req", trigger: "booking_confirmed", channel: "sms", enabled: true, template: "Leave a review: {{reviewUrl}} or chat: {{textCommsUrl}}" },
+          ],
+        },
+      },
+    });
+
+    await sendImmediateWorkflowMessages(
+      { supabaseClient, twilioClient, clinic, trigger: "booking_confirmed", appointmentId: "apt_1", toPhone: "+919888888888", data: {} },
+      null,
+    );
+
+    assert.match(twilioClient.calls.sendSms[0].body, /Leave a review: https:\/\/g\.page\/r\/nirmaya-clinic\/review/);
+    assert.match(twilioClient.calls.sendSms[0].body, /chat: https:\/\/wa\.me\/14155238886\?text=BOOKING%20apt_1/);
+  });
+
   test("records a failed status without throwing when the send errors", async () => {
     const supabaseClient = createTableStub();
     const twilioClient = createTwilioStub({ shouldFailSend: true });
@@ -267,6 +295,35 @@ describe("sendDelayedWorkflowMessage", () => {
     assert.equal(twilioClient.calls.sendWhatsApp[0].to, "+919888888888");
     assert.match(twilioClient.calls.sendWhatsApp[0].body, /Reminder for Rahul with Dr\. Priya/);
     assert.equal(supabaseClient._tables.Reminder[0].status, "sent");
+  });
+
+  test("a review_request workflow's template can reference {{reviewUrl}}", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [
+        makeClinic({
+          googleReviewUrl: "https://g.page/r/nirmaya-clinic/review",
+          settings: {
+            communication: {
+              channelsEnabled: ["whatsapp"],
+              workflows: [
+                { id: "review-2h-after", trigger: "review_request", channel: "whatsapp", offsetMinutes: 150, enabled: true, template: "Thanks for visiting! Please review us: {{reviewUrl}}" },
+              ],
+            },
+          },
+        }),
+      ],
+      Appointment: [{ id: "apt_1", patientId: "pat_1", doctorId: "doc_1", timeslot: "2026-08-20T10:00:00" }],
+      Patient: [{ id: "pat_1", fullName: "Rahul", contactNumber: "+919888888888" }],
+      Doctor: [{ id: "doc_1", fullName: "Dr. Priya" }],
+    });
+    const twilioClient = createTwilioStub();
+
+    await sendDelayedWorkflowMessage(
+      { supabaseClient, twilioClient, clinicId: "clinic-1", appointmentId: "apt_1", workflowId: "review-2h-after" },
+      null,
+    );
+
+    assert.match(twilioClient.calls.sendWhatsApp[0].body, /Please review us: https:\/\/g\.page\/r\/nirmaya-clinic\/review/);
   });
 
   test("skips as a no-op when a Reminder row already exists for this (appointmentId, workflowId)", async () => {

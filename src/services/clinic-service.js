@@ -220,6 +220,7 @@ const CLINIC_PROFILE_FIELDS = [
   "defaultAppointmentDurationMins",
   "tokenMoneyEnabled",
   "tokenAmountPaise",
+  "googleReviewUrl",
 ];
 
 async function updateClinicProfile(supabaseClient, clinicId, patch) {

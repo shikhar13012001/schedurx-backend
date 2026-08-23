@@ -2550,6 +2550,53 @@ test("POST /webhooks/twilio/whatsapp-inbound: custom plan without the ai_whatsap
   );
 });
 
+// ─── /api/v1/clinic (Phase 7: googleReviewUrl) ─────────────────────────────
+
+test("PATCH /api/v1/clinic lets the owner set googleReviewUrl; a receptionist gets 403", async () => {
+  const supabaseClient = createTableStub({
+    Staff: [
+      { id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true },
+      { id: "staff-reception", firebaseUid: "staff-reception", clinicId: "clinic-1", role: "receptionist", isActive: true },
+    ],
+    Clinic: [{ id: "clinic-1", status: "active", name: "Nirmaya Clinic" }],
+  });
+
+  const ownerApp = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: createFirebaseAdminStub({ decodedToken: { uid: "staff-owner", role: "owner", clinicId: "clinic-1", doctorId: null } }),
+    stripeClient: null,
+    openaiClient: null,
+  });
+  await withServer(ownerApp, async ({ request }) => {
+    const response = await request("/api/v1/clinic", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ googleReviewUrl: "https://g.page/r/nirmaya-clinic/review" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.clinic.googleReviewUrl, "https://g.page/r/nirmaya-clinic/review");
+  });
+  assert.equal(supabaseClient._tables.Clinic[0].googleReviewUrl, "https://g.page/r/nirmaya-clinic/review");
+
+  const receptionApp = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: createFirebaseAdminStub({ decodedToken: { uid: "staff-reception", role: "receptionist", clinicId: "clinic-1", doctorId: null } }),
+    stripeClient: null,
+    openaiClient: null,
+  });
+  await withServer(receptionApp, async ({ request }) => {
+    const response = await request("/api/v1/clinic", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ googleReviewUrl: "https://example.com/hijack" }),
+    });
+    assert.equal(response.status, 403);
+  });
+});
+
 // ─── /api/v1/billing/subscription ───────────────────────────────────────────
 
 function ownerApp(supabaseClient, stripeClient) {
@@ -3055,6 +3102,46 @@ test("POST /api/v1/public/appointments books a real appointment, creating the Pa
     assert.equal(body.data.patient.contactNumber, "+919123456780");
     assert.equal(supabaseClient._tables.Appointment[0].source, "patient_web");
     assert.equal(supabaseClient._tables.Patient.length, 1);
+  });
+});
+
+// Phase 7: the minimal contract schedurx-form-agent's thank-you page CTAs
+// consume — a separate repo not available this session, so this is the
+// documented handoff (see docs) rather than an edit made to that repo.
+test("GET /api/v1/public/appointments/:id/comms-links returns reviewUrl and a wa.me textCommsUrl", async () => {
+  const futureStart = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+  const supabaseClient = createTableStub({
+    Clinic: [publicClinicRow({ whatsappFrom: "+14155238886", googleReviewUrl: "https://g.page/r/nirmaya-clinic/review" })],
+    Appointment: [{ id: "apt_public_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", timeslot: futureStart, status: "booked", auditHistory: [] }],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const missing = await request("/api/v1/public/appointments/apt_public_1/comms-links");
+    assert.equal(missing.status, 422);
+
+    const response = await request("/api/v1/public/appointments/apt_public_1/comms-links?clinicId=clinic-1");
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.reviewUrl, "https://g.page/r/nirmaya-clinic/review");
+    assert.equal(body.data.textCommsUrl, "https://wa.me/14155238886?text=BOOKING%20apt_public_1");
+  });
+});
+
+test("GET /api/v1/public/appointments/:id/comms-links returns nulls gracefully when the clinic hasn't configured them", async () => {
+  const futureStart = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+  const supabaseClient = createTableStub({
+    Clinic: [publicClinicRow({ whatsappFrom: null, googleReviewUrl: null })],
+    Appointment: [{ id: "apt_public_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", timeslot: futureStart, status: "booked", auditHistory: [] }],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/public/appointments/apt_public_1/comms-links?clinicId=clinic-1");
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.reviewUrl, null);
+    assert.equal(body.data.textCommsUrl, null);
   });
 });
 

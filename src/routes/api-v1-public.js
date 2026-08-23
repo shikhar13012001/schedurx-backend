@@ -22,6 +22,7 @@ const clinicSvc = require("../services/clinic-service");
 const appointmentSvc = require("../services/appointment-service");
 const availabilitySvc = require("../services/availability-service");
 const stripeSvc = require("../services/stripe-service");
+const commsWorkflowSvc = require("../services/comms-workflow-service");
 const { config } = require("../config");
 const { normalizeIndianMobile } = require("../lib/phone");
 
@@ -228,6 +229,35 @@ function createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient, stri
       });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:public] get appointment failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
+  // GET /api/v1/public/appointments/:id/comms-links?clinicId= — the minimal
+  // contract for schedurx-form-agent's thank-you page CTAs (Phase 7):
+  // reviewUrl (Clinic.googleReviewUrl, null if the clinic hasn't set one)
+  // and textCommsUrl (a wa.me deep link straight into this booking's own
+  // Thread — see webhooks-twilio.js's BOOKING deep-link fast path). Same
+  // capability model as the confirmation route above (id + clinicId
+  // together); doesn't require Twilio to be configured (returns
+  // textCommsUrl: null instead of a link nobody could open).
+  router.get("/appointments/:id/comms-links", async (req, res) => {
+    const { clinicId } = req.query;
+    if (!clinicId) return fail(res, 422, "MISSING_FIELDS", "clinicId is required");
+
+    try {
+      const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
+      if (!clinic) return fail(res, 404, "CLINIC_NOT_FOUND", "Clinic not found");
+
+      const appt = await tableSvc.getAppointmentById(supabaseClient, clinicId, req.params.id);
+      if (!appt) return fail(res, 404, "APPOINTMENT_NOT_FOUND", "Appointment not found");
+
+      return ok(res, {
+        reviewUrl: clinic.googleReviewUrl ?? null,
+        textCommsUrl: commsWorkflowSvc.buildTextCommsUrl(clinic, appt.id),
+      });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:public] get comms-links failed");
       return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
     }
   });
