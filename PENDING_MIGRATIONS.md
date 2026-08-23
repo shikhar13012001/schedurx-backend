@@ -16,6 +16,12 @@ All are additive (`ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT
 EXISTS`) — safe to run against the live database with no downtime, and
 safe to re-run if one partially applies.
 
+**Convenience**: `scripts/pending-migrations-combined.sql` is the same five
+files concatenated in this order — paste that one file into the SQL Editor
+instead of running five separately. It's a snapshot, not a generator; if
+any of the five migration files change, regenerate it by hand before
+relying on it again.
+
 ## Why this blocks a deploy, not just a "nice to have"
 
 The code already pushed to `main` (Phases 4 and 6 especially) writes rows
