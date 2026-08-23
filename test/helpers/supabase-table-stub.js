@@ -202,12 +202,23 @@ function createTableStub(initialTables = {}) {
         };
         return chain;
       },
+      // Real PostgREST throws PGRST116 ("multiple (or no) rows returned")
+      // when a .maybeSingle()/.single() query matches more than one row —
+      // replicated here (not just "take rows[0]") so a query that's missing
+      // a filter it needs shows up as a real test failure instead of
+      // silently passing against this stub while breaking in production.
       async maybeSingle() {
         const rows = currentRows();
+        if (rows.length > 1) {
+          return { data: null, error: { code: "PGRST116", message: "JSON object requested, multiple (or no) rows returned" } };
+        }
         return { data: rows[0] ?? null, error: null };
       },
       async single() {
         const rows = currentRows();
+        if (rows.length > 1) {
+          return { data: null, error: { code: "PGRST116", message: "JSON object requested, multiple (or no) rows returned" } };
+        }
         return { data: rows[0] ?? null, error: rows[0] ? null : { message: "not found" } };
       },
     };

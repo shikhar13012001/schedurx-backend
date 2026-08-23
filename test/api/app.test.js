@@ -894,6 +894,7 @@ test("POST /api/v1/threads/find-or-create resolves a real thread for a patient, 
         contactPhone: "+919999999999",
         status: "open",
         unreadCount: 0,
+        scope: "general", // matches the real column's NOT NULL DEFAULT 'general' — see Thread.scope, Phase 4
       },
     ],
   });
@@ -914,6 +915,38 @@ test("POST /api/v1/threads/find-or-create resolves a real thread for a patient, 
     const body = await readJson(response);
     assert.equal(response.status, 200, JSON.stringify(body));
     assert.equal(body.data.thread.id, "thread_1");
+  });
+});
+
+// Phase 4 regression guard: once a patient has BOTH a general thread and a
+// booking-scoped one open at the same time (entirely normal — e.g. they
+// used a BOOKING-id deep link once, on top of an ongoing general
+// conversation), find-or-create must still resolve to the general one, not
+// error out. Before scoping findOrCreateThread's lookup to scope:'general',
+// this threw — real Supabase's .maybeSingle() rejects 2+ matching rows.
+test("POST /api/v1/threads/find-or-create still works when the patient also has an open booking-scoped thread", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "receptionist", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Patient: [{ id: "pat_1", clinicId: "clinic-1", fullName: "Rahul", contactNumber: "+919999999999" }],
+    Thread: [
+      { id: "thread_general", clinicId: "clinic-1", patientId: "pat_1", channel: "whatsapp", contactPhone: "+919999999999", status: "open", unreadCount: 0, scope: "general" },
+      { id: "thread_booking", clinicId: "clinic-1", patientId: "pat_1", doctorId: "doc-1", appointmentId: "apt_1", channel: "whatsapp", contactPhone: "+919999999999", status: "open", unreadCount: 0, scope: "booking" },
+    ],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/threads/find-or-create", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ patientId: "pat_1" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.data.thread.id, "thread_general");
   });
 });
 

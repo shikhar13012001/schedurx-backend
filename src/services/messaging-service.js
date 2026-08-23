@@ -159,8 +159,19 @@ async function sendTemplatedMessage(
 
 // Used by the inbound WhatsApp webhook (webhooks-twilio.js) to route an
 // incoming patient message into the same Thread/ChatMsg inbox staff already
-// use for replies — one active (non-closed) thread per contact/channel,
-// matching how a support inbox normally behaves.
+// use for replies — one active (non-closed) *general* thread per
+// contact/channel, matching how a support inbox normally behaves.
+//
+// Explicitly scoped to scope:'general' (not just "any non-closed thread for
+// this phone") — since Phase 4, a patient can easily have a booking-scoped
+// thread open at the same time as a general one (e.g. they used a
+// BOOKING-id deep link once, and also have an ongoing general conversation).
+// Without this filter, the lookup below could match 2+ rows once both
+// exist, and real Supabase's .maybeSingle() throws (PGRST116) on more than
+// one match — unlike this codebase's test stub, which silently returns the
+// first row and so never caught this. Filtering by scope keeps "the
+// general thread for this contact" and "the booking thread for that
+// appointment" from ever competing for the same lookup.
 async function findOrCreateThread(supabaseClient, { clinicId, patientId, contactPhone, channel = "whatsapp" }) {
   const { data: existing, error: findErr } = await supabaseClient
     .from("Thread")
@@ -168,6 +179,7 @@ async function findOrCreateThread(supabaseClient, { clinicId, patientId, contact
     .eq("clinicId", clinicId)
     .eq("contactPhone", contactPhone)
     .eq("channel", channel)
+    .eq("scope", "general")
     .neq("status", "closed")
     .maybeSingle();
   if (findErr) throw dbErr(`finding thread: ${findErr.message}`);

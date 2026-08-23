@@ -104,6 +104,27 @@ describe("sendReply / escalate / markRead respect doctor isolation", () => {
   });
 });
 
+describe("findOrCreateThread", () => {
+  test("resolves the existing general thread, not a co-existing booking-scoped one for the same contact", async () => {
+    const supabaseClient = createTableStub({
+      Thread: [
+        { id: "thread_general", clinicId: "clinic-1", patientId: "pat-1", channel: "whatsapp", contactPhone: "+919999999994", status: "open", scope: "general" },
+        { id: "thread_booking", clinicId: "clinic-1", patientId: "pat-1", doctorId: "doc-a", appointmentId: "apt_x", channel: "whatsapp", contactPhone: "+919999999994", status: "open", scope: "booking" },
+      ],
+    });
+    const thread = await messagingSvc.findOrCreateThread(supabaseClient, { clinicId: "clinic-1", patientId: "pat-1", contactPhone: "+919999999994" });
+    assert.equal(thread.id, "thread_general");
+  });
+
+  test("creates a new thread explicitly tagged scope:'general'", async () => {
+    const supabaseClient = createTableStub({ Thread: [] });
+    const thread = await messagingSvc.findOrCreateThread(supabaseClient, { clinicId: "clinic-1", patientId: "pat-1", contactPhone: "+919999999995" });
+    assert.equal(thread.scope, "general");
+    assert.equal(thread.doctorId, null);
+    assert.equal(thread.appointmentId, null);
+  });
+});
+
 describe("findOrCreateBookingThread", () => {
   test("creates a booking-scoped thread tied to the appointment's doctor", async () => {
     const supabaseClient = createTableStub({ Thread: [] });
