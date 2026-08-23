@@ -2208,6 +2208,84 @@ test("POST /webhooks/twilio/whatsapp-inbound classifies and stores real AI triag
   });
 });
 
+// Phase 5: auto-escalate the first time a thread newly reaches "critical".
+test("POST /webhooks/twilio/whatsapp-inbound auto-escalates with a clinic-wide broadcast the first time a general thread turns critical", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Notification: [],
+  });
+  const twilioClient = createTwilioStub();
+  const openaiClient = createOpenaiStub({ content: JSON.stringify({ triage: "critical", summary: "Patient reports chest pain." }) });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "chest pain", MessageSid: "SM-esc-1" }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.equal(supabaseClient._tables.Notification.length, 1);
+  const notification = supabaseClient._tables.Notification[0];
+  assert.equal(notification.type, "thread_critical");
+  assert.equal(notification.staffId, null, "a general thread has no single owning doctor — broadcast clinic-wide");
+  assert.equal(notification.clinicId, "clinic-1");
+});
+
+test("POST /webhooks/twilio/whatsapp-inbound does not re-escalate an already-critical thread on a second message", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Notification: [],
+  });
+  const twilioClient = createTwilioStub();
+  const openaiClient = createOpenaiStub({ content: JSON.stringify({ triage: "critical", summary: "Still critical." }) });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const fields = { From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "chest pain" };
+    await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ ...fields, MessageSid: "SM-esc-a" }),
+    });
+    await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ ...fields, Body: "still hurts", MessageSid: "SM-esc-b" }),
+    });
+  });
+
+  assert.equal(supabaseClient._tables.Notification.length, 1, "a second critical classification on the same thread must not create a duplicate escalation");
+});
+
+test("POST /webhooks/twilio/whatsapp-inbound auto-escalates a booking-scoped thread turning critical directly to the assigned doctor", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
+    Staff: [{ id: "staff-doc-1", clinicId: "clinic-1", doctorId: "doc-1", role: "doctor" }],
+    Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919888888888" }],
+    Appointment: [{ id: "apt_booking_esc", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+    Notification: [],
+  });
+  const twilioClient = createTwilioStub();
+  const openaiClient = createOpenaiStub({ content: JSON.stringify({ triage: "critical", summary: "Urgent." }) });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+10000000000", Body: "BOOKING apt_booking_esc", MessageSid: "SM-esc-c" }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.equal(supabaseClient._tables.Notification.length, 1);
+  assert.equal(supabaseClient._tables.Notification[0].staffId, "staff-doc-1");
+});
+
 test("POST /webhooks/twilio/whatsapp-inbound reuses the same open thread across multiple messages", async () => {
   const supabaseClient = createTableStub({
     Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],

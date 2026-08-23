@@ -32,6 +32,7 @@ const messagingSvc = require("../services/messaging-service");
 const tableSvc = require("../services/table-service");
 const whatsappAgentSvc = require("../services/whatsapp-agent-service");
 const openaiSvc = require("../services/openai-service");
+const notificationSvc = require("../services/notification-service");
 const plansSvc = require("../lib/plans");
 const crypto = require("node:crypto");
 const { config } = require("../config");
@@ -100,16 +101,56 @@ function verifyTwilioSignature(twilioClient) {
 // on a schema-cache miss) so this works before the Thread.triage/aiSummary
 // migration has been applied, same defensive pattern as
 // messaging-service.js's recordOutboundAiMessage.
-async function classifyAndStoreTriage(supabaseClient, openaiClient, threadId, body, log) {
+//
+// Takes the full `thread` (not just its id) so it can both read the
+// pre-update triage — auto-escalate (Phase 5) only fires the first time a
+// thread newly reaches "critical", not on every repeat classification of an
+// already-critical conversation — and target the notification correctly
+// (thread.doctorId for a booking-scoped thread, clinic-wide broadcast for a
+// general one).
+async function classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, log) {
   if (!openaiClient || !body) return;
+  const wasCritical = thread.triage === "critical";
   try {
     const { triage, summary } = await openaiSvc.classifyTriage(openaiClient, body);
-    const { error } = await supabaseClient.from("Thread").update({ triage, aiSummary: summary }).eq("id", threadId);
+    const { error } = await supabaseClient.from("Thread").update({ triage, aiSummary: summary }).eq("id", thread.id);
     if (error && /column/i.test(error.message ?? "")) {
-      await supabaseClient.from("Thread").update({ triage }).eq("id", threadId);
+      await supabaseClient.from("Thread").update({ triage }).eq("id", thread.id);
+    }
+    if (triage === "critical" && !wasCritical) {
+      await notifyNewCriticalThread(supabaseClient, thread, log);
     }
   } catch (err) {
-    log?.warn({ err, threadId }, "[webhooks:twilio] triage classification failed");
+    log?.warn({ err, threadId: thread.id }, "[webhooks:twilio] triage classification failed");
+  }
+}
+
+// Notifies the thread's own doctor (booking-scoped) or the whole clinic
+// (general — no single doctor owns it) that a conversation just became High
+// priority. Never throws — a notification failure shouldn't undo the triage
+// classification that already succeeded.
+async function notifyNewCriticalThread(supabaseClient, thread, log) {
+  try {
+    let staffId = null;
+    if (thread.doctorId) {
+      const { data: staffRow } = await supabaseClient
+        .from("Staff")
+        .select("id")
+        .eq("clinicId", thread.clinicId)
+        .eq("doctorId", thread.doctorId)
+        .maybeSingle();
+      staffId = staffRow?.id ?? null; // no matching Staff row — falls back to the clinic-wide broadcast below
+    }
+    await notificationSvc.createNotification(supabaseClient, {
+      clinicId: thread.clinicId,
+      staffId,
+      type: "thread_critical",
+      title: "Urgent message needs attention",
+      body: "A patient conversation was just flagged High priority.",
+      data: { threadId: thread.id },
+    });
+  } catch (err) {
+    log?.warn({ err, threadId: thread.id }, "[webhooks:twilio] failed to create critical-triage notification");
   }
 }
 
@@ -330,7 +371,7 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
         if (bookingThread) {
           const { clinic, patient, thread } = bookingThread;
           await messagingSvc.recordInboundMessage(supabaseClient, { clinicId: clinic.id, thread, body, waMessageId: messageSid });
-          await classifyAndStoreTriage(supabaseClient, openaiClient, thread.id, body, req.log);
+          await classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, req.log);
 
           const entitlements = plansSvc.entitlementsForPlan(clinic.plan?.planId, clinic.plan?.addonIds);
           if (!assistantModel || !entitlements.whatsappConversationalAi) {
@@ -414,7 +455,7 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
         body,
         waMessageId: messageSid,
       });
-      await classifyAndStoreTriage(supabaseClient, openaiClient, thread.id, body, req.log);
+      await classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, req.log);
 
       // Plan-gated: the full conversational agent only runs for clinics whose
       // plan actually includes it (premium, or custom + ai_whatsapp_agent) —
