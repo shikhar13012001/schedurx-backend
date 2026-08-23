@@ -90,22 +90,27 @@ function makeTables(extra = {}) {
     ],
     Visit: [{ id: "v1", clinicId: CLINIC_ID, patientId: PATIENT_ID, visitDate: "2026-01-01", diagnosis: "Flu" }],
     Thread: [{ id: THREAD_ID, clinicId: CLINIC_ID, status: "open" }],
+    Patient: [
+      { id: PATIENT_ID, clinicId: CLINIC_ID, fullName: "Caller Patient", contactNumber: "+919999999991" },
+      { id: OTHER_PATIENT_ID, clinicId: CLINIC_ID, fullName: "Someone Else", contactNumber: "+919999999992" },
+    ],
     ...extra,
   };
 }
 
 function makeTools(supabaseClient, overrides = {}) {
+  const { context, ...rest } = overrides;
   return buildPatientAgentTools({
     supabaseClient,
     nettuClient: {},
     twilioClient: {},
     clinicId: CLINIC_ID,
-    patientId: PATIENT_ID,
+    context: context ?? { patientId: PATIENT_ID },
     threadId: THREAD_ID,
     doctors: [{ id: "doc-1", fullName: "Dr. Priya" }],
     timezone: "Asia/Kolkata",
     log: null,
-    ...overrides,
+    ...rest,
   });
 }
 
@@ -224,6 +229,80 @@ describe("reschedule_my_appointments", () => {
     });
     assert.equal(result.ok, false);
     assert.match(result.error, /only apply to a single/);
+  });
+});
+
+describe("confirm_identity", () => {
+  test("resolves and corrects context.patientId from an exact phone number the caller typed", async () => {
+    const supabaseClient = createTableStub(makeTables());
+    const context = { patientId: PATIENT_ID };
+    const tools = makeTools(supabaseClient, { context });
+
+    const result = await tools.confirm_identity.execute({ phone: "+919999999992" });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.patientName, "Someone Else");
+    assert.equal(context.patientId, OTHER_PATIENT_ID, "the shared context object must be mutated in place");
+
+    const { data: thread } = await supabaseClient.from("Thread").eq("id", THREAD_ID).maybeSingle();
+    assert.equal(thread.confirmedPatientId, OTHER_PATIENT_ID, "must persist onto the Thread for later messages");
+  });
+
+  test("resolves from an exact booking id the caller typed", async () => {
+    const supabaseClient = createTableStub(makeTables());
+    const context = { patientId: PATIENT_ID };
+    const tools = makeTools(supabaseClient, { context });
+
+    const result = await tools.confirm_identity.execute({ appointmentId: "apt_someone_elses" });
+
+    assert.equal(result.ok, true);
+    assert.equal(context.patientId, OTHER_PATIENT_ID);
+  });
+
+  test("rejects when neither a phone nor a booking id is given", async () => {
+    const tools = makeTools(createTableStub(makeTables()));
+    const result = await tools.confirm_identity.execute({});
+    assert.equal(result.ok, false);
+  });
+
+  test("does not mutate context when the phone matches nobody at this clinic", async () => {
+    const context = { patientId: PATIENT_ID };
+    const tools = makeTools(createTableStub(makeTables()), { context });
+    const result = await tools.confirm_identity.execute({ phone: "+919000000000" });
+    assert.equal(result.ok, false);
+    assert.equal(context.patientId, PATIENT_ID, "an unmatched phone must never change whose record is in use");
+  });
+
+  test("a correction takes effect immediately for later tool calls in the same conversation turn", async () => {
+    const supabaseClient = createTableStub(makeTables());
+    const context = { patientId: PATIENT_ID };
+    const tools = makeTools(supabaseClient, { context });
+
+    await tools.confirm_identity.execute({ phone: "+919999999992" });
+    // apt_someone_elses belongs to OTHER_PATIENT_ID — only visible now that
+    // context.patientId has been corrected to match.
+    const result = await tools.get_my_appointments.execute({});
+    assert.deepEqual(result.appointments.map((a) => a.appointmentId), ["apt_someone_elses"]);
+  });
+});
+
+describe("booking-scoped threads get a narrower tool set", () => {
+  test("omits reschedule/cancel/find_reschedule_slots, keeps confirm_identity and the read-only tools", async () => {
+    const tools = makeTools(createTableStub(makeTables()), { scope: "booking" });
+    assert.equal(tools.reschedule_my_appointments, undefined);
+    assert.equal(tools.cancel_my_appointments, undefined);
+    assert.equal(tools.find_reschedule_slots, undefined);
+    assert.ok(tools.confirm_identity);
+    assert.ok(tools.get_my_appointments);
+    assert.ok(tools.get_my_visit_history);
+    assert.ok(tools.escalate_to_staff);
+  });
+
+  test("a general (default) thread keeps the full tool set", async () => {
+    const tools = makeTools(createTableStub(makeTables()));
+    assert.ok(tools.reschedule_my_appointments);
+    assert.ok(tools.cancel_my_appointments);
+    assert.ok(tools.find_reschedule_slots);
   });
 });
 

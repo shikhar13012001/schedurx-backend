@@ -226,6 +226,53 @@ function buildStructuredFallbackReply(clinic, callerPhone) {
   return lines.join(" ");
 }
 
+// Shared by both the booking-ID fast path and the normal phone-based
+// resolution below — records the inbound message, then either runs the full
+// conversational agent (entitlement-gated, Phase 1) or the structured
+// fallback. Returns the reply text, or null for an empty-TwiML ack.
+//
+// De-lag (Phase 6): triage classification and the agent's own reply
+// generation are independent OpenAI calls with no correctness reason to run
+// sequentially — classifyAndStoreTriage previously ran to completion before
+// the agent's own (up to 8-step) tool-calling loop even started, roughly
+// doubling worst-case latency on a slow LLM round trip for no benefit,
+// since neither depends on the other's result.
+async function handleInboundMessage({ supabaseClient, nettuClient, twilioClient, openaiClient, assistantModel, clinic, patient, thread, body, messageSid, log }) {
+  await messagingSvc.recordInboundMessage(supabaseClient, { clinicId: clinic.id, thread, body, waMessageId: messageSid });
+
+  const entitlements = plansSvc.entitlementsForPlan(clinic.plan?.planId, clinic.plan?.addonIds);
+  if (!assistantModel || !entitlements.whatsappConversationalAi) {
+    await classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, log);
+    if (!entitlements.whatsappStructuredBooking) return null;
+    const replyText = buildStructuredFallbackReply(clinic, thread.contactPhone);
+    await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
+    return replyText;
+  }
+
+  // Phase 6: a prior confirm_identity tool call may have corrected which
+  // patient this thread is really about (e.g. a shared family phone, or a
+  // caregiver texting on someone else's behalf) — reuse that correction for
+  // every subsequent message instead of re-resolving to the original
+  // phone-matched patient each time.
+  let effectivePatient = patient;
+  if (thread.confirmedPatientId && thread.confirmedPatientId !== patient.id) {
+    effectivePatient = (await tableSvc.getPatientById(supabaseClient, clinic.id, thread.confirmedPatientId)) ?? patient;
+  }
+
+  const [, replyResult] = await Promise.allSettled([
+    classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, log),
+    whatsappAgentSvc.respondToPatientMessage(
+      { supabaseClient, nettuClient, twilioClient, assistantModel, clinic, patient: effectivePatient, thread },
+      log,
+    ),
+  ]);
+  const replyText = replyResult.status === "fulfilled" ? replyResult.value : null;
+  if (!replyText) return null;
+
+  await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
+  return replyText;
+}
+
 function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, assistantModel, openaiClient, elevenLabsClient }) {
   const router = Router();
   const verify = verifyTwilioSignature(twilioClient);
@@ -370,25 +417,11 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
         const bookingThread = await resolveBookingThread(supabaseClient, bookingMatch[1], from, req.log);
         if (bookingThread) {
           const { clinic, patient, thread } = bookingThread;
-          await messagingSvc.recordInboundMessage(supabaseClient, { clinicId: clinic.id, thread, body, waMessageId: messageSid });
-          await classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, req.log);
-
-          const entitlements = plansSvc.entitlementsForPlan(clinic.plan?.planId, clinic.plan?.addonIds);
-          if (!assistantModel || !entitlements.whatsappConversationalAi) {
-            if (!entitlements.whatsappStructuredBooking) return emptyReply();
-            const replyText = buildStructuredFallbackReply(clinic, from);
-            await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
-            const twiml = new MessagingResponse();
-            twiml.message(replyText);
-            return res.type("text/xml").send(twiml.toString());
-          }
-
-          const replyText = await whatsappAgentSvc.respondToPatientMessage(
-            { supabaseClient, nettuClient, twilioClient, assistantModel, clinic, patient, thread },
-            req.log,
-          );
+          const replyText = await handleInboundMessage({
+            supabaseClient, nettuClient, twilioClient, openaiClient, assistantModel,
+            clinic, patient, thread, body, messageSid, log: req.log,
+          });
           if (!replyText) return emptyReply();
-          await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
           const twiml = new MessagingResponse();
           twiml.message(replyText);
           return res.type("text/xml").send(twiml.toString());
@@ -449,36 +482,11 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
         patientId: patient.id,
         contactPhone: from,
       });
-      await messagingSvc.recordInboundMessage(supabaseClient, {
-        clinicId: clinic.id,
-        thread,
-        body,
-        waMessageId: messageSid,
+      const replyText = await handleInboundMessage({
+        supabaseClient, nettuClient, twilioClient, openaiClient, assistantModel,
+        clinic, patient, thread, body, messageSid, log: req.log,
       });
-      await classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, req.log);
-
-      // Plan-gated: the full conversational agent only runs for clinics whose
-      // plan actually includes it (premium, or custom + ai_whatsapp_agent) —
-      // entitlementsForPlan already modeled this split, it just wasn't read
-      // anywhere before now. Every clinic still gets *some* reply via the
-      // structured fallback rather than silently going quiet.
-      const entitlements = plansSvc.entitlementsForPlan(clinic.plan?.planId, clinic.plan?.addonIds);
-      if (!assistantModel || !entitlements.whatsappConversationalAi) {
-        if (!entitlements.whatsappStructuredBooking) return emptyReply();
-        const replyText = buildStructuredFallbackReply(clinic, from);
-        await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
-        const twiml = new MessagingResponse();
-        twiml.message(replyText);
-        return res.type("text/xml").send(twiml.toString());
-      }
-
-      const replyText = await whatsappAgentSvc.respondToPatientMessage(
-        { supabaseClient, nettuClient, twilioClient, assistantModel, clinic, patient, thread },
-        req.log,
-      );
       if (!replyText) return emptyReply();
-
-      await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
       const twiml = new MessagingResponse();
       twiml.message(replyText);
       return res.type("text/xml").send(twiml.toString());

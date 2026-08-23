@@ -3,6 +3,7 @@
 
 const crypto = require("node:crypto");
 const { normalizeAppointments } = require("../lib/dates");
+const { normalizeIndianMobile } = require("../lib/phone");
 
 function dbErr(msg) {
   return Object.assign(new Error(`DB error ${msg}`), { code: "DATABASE_ERROR", statusCode: 500 });
@@ -62,6 +63,28 @@ async function findPatientByPhone(supabase, clinicId, phone) {
     .maybeSingle();
   if (error) throw dbErr(`finding patient: ${error.message}`);
   return data ?? null;
+}
+
+// Genuinely exact — unlike findPatientByPhone's suffix-match "best effort"
+// lookup (which can return the wrong person if two numbers happen to share
+// their last 10 digits, and never verifies the full number), this is an
+// identity-security boundary: the WhatsApp agent's confirm_identity tool
+// (Phase 6) uses this, not findPatientByPhone, so it can only ever attach to
+// a patient whose full number genuinely matches what the caller just typed.
+// Narrows via the same last-10-digit DB filter for efficiency, then verifies
+// the complete normalized number matches before returning anything.
+async function findPatientByExactPhone(supabase, clinicId, phone) {
+  const normalized = normalizeIndianMobile(phone);
+  if (!normalized) return null;
+
+  const { data, error } = await supabase
+    .from("Patient")
+    .select("*")
+    .ilike("contactNumber", phoneSuffixPattern(phone))
+    .eq("clinicId", clinicId);
+  if (error) throw dbErr(`finding patient by exact phone: ${error.message}`);
+
+  return (data ?? []).find((row) => normalizeIndianMobile(row.contactNumber) === normalized) ?? null;
 }
 
 async function createPatient(supabase, clinicId, phone) {
@@ -231,6 +254,7 @@ async function searchPatients(supabase, clinicId, q) {
 module.exports = {
   listActiveDoctors,
   findPatientByPhone,
+  findPatientByExactPhone,
   findPatientsByPhoneAcrossClinics,
   createPatient,
   findOrCreatePatient,
