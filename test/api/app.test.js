@@ -14,7 +14,7 @@ const { createTableStub } = require("../helpers/supabase-table-stub");
 const { createFirebaseAdminStub } = require("../helpers/firebase-admin-stub");
 const { createStripeStub } = require("../helpers/stripe-stub");
 const { createOpenaiStub } = require("../helpers/openai-stub");
-const { MockLanguageModelV4, simulateReadableStream } = require("ai/test");
+const { MockLanguageModelV4, MockLanguageModelV3, simulateReadableStream } = require("ai/test");
 const { createTwilioStub } = require("../helpers/twilio-stub");
 
 // Minimal Supabase stub: Clinic lookups miss by default, Patient lookups/creates
@@ -1907,13 +1907,20 @@ test("POST /webhooks/twilio/whatsapp-inbound routes a patient message into the T
     assert.equal(thread.channel, "whatsapp");
     assert.equal(thread.unreadCount, 1);
 
-    assert.equal(supabaseClient._tables.ChatMsg.length, 1);
-    assert.equal(supabaseClient._tables.ChatMsg[0].direction, "inbound");
-    assert.equal(supabaseClient._tables.ChatMsg[0].body, "Can I reschedule my appointment?");
-    assert.equal(supabaseClient._tables.ChatMsg[0].waMessageId, "SM1");
+    // No assistantModel configured at all (deployment-level, not plan-gated)
+    // still gets a structured fallback reply now — see the Phase 1 tests
+    // below for the plan-gated cases. Two ChatMsg rows: the inbound message,
+    // and the automated structured reply.
+    assert.equal(supabaseClient._tables.ChatMsg.length, 2);
+    const inbound = supabaseClient._tables.ChatMsg.find((m) => m.direction === "inbound");
+    assert.equal(inbound.body, "Can I reschedule my appointment?");
+    assert.equal(inbound.waMessageId, "SM1");
+    const outbound = supabaseClient._tables.ChatMsg.find((m) => m.direction === "outbound");
+    assert.match(outbound.body, /Nirmaya Clinic/);
 
-    assert.equal(supabaseClient._tables.WaLog.length, 1);
-    assert.equal(supabaseClient._tables.WaLog[0].direction, "inbound");
+    // One inbound + one outbound (the structured reply) WaLog entry now.
+    assert.equal(supabaseClient._tables.WaLog.length, 2);
+    assert.equal(supabaseClient._tables.WaLog.filter((w) => w.direction === "inbound").length, 1);
   });
 });
 
@@ -1982,7 +1989,9 @@ test("POST /webhooks/twilio/whatsapp-inbound reuses the same open thread across 
 
     assert.equal(supabaseClient._tables.Thread.length, 1);
     assert.equal(supabaseClient._tables.Thread[0].unreadCount, 2);
-    assert.equal(supabaseClient._tables.ChatMsg.length, 2);
+    // 2 inbound + 2 structured-fallback outbound replies (see the ChatMsg
+    // count note on the test above — same behavior change).
+    assert.equal(supabaseClient._tables.ChatMsg.length, 4);
   });
 });
 
@@ -2007,6 +2016,139 @@ test("POST /webhooks/twilio/whatsapp-inbound replies empty TwiML when no clinic 
     assert.equal(response.status, 200);
     assert.equal(supabaseClient._tables.Thread?.length ?? 0, 0);
   });
+});
+
+// Phase 1: entitlementsForPlan() gates whether the full conversational
+// WhatsApp agent runs, or a clinic gets the structured/CTA fallback instead —
+// see webhooks-twilio.js's whatsapp-inbound handler and buildStructuredFallbackReply.
+function whatsappAgentModel(text) {
+  return new MockLanguageModelV3({
+    doGenerate: async () => ({
+      finishReason: "stop",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      content: [{ type: "text", text }],
+      warnings: [],
+    }),
+  });
+}
+
+test("POST /webhooks/twilio/whatsapp-inbound sends the structured fallback for a basic-plan clinic, never invoking the AI model", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398", plan: { planId: "basic" } }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+    // If the entitlement gate is broken and this gets called anyway, doGenerate
+    // throwing makes the failure obvious instead of silently "working" via a
+    // reply that happens to look similar.
+    assistantModel: new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw new Error("the AI agent must not run for a basic-plan clinic");
+      },
+    }),
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "hi", MessageSid: "SM-basic-1" }),
+    });
+    assert.equal(response.status, 200);
+    const outbound = supabaseClient._tables.ChatMsg.find((m) => m.direction === "outbound");
+    assert.ok(outbound, "expected a structured fallback reply to be recorded");
+    assert.match(outbound.body, /Nirmaya Clinic/);
+  });
+});
+
+test("POST /webhooks/twilio/whatsapp-inbound invokes the full AI agent for a premium-plan clinic", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398", plan: { planId: "premium" } }],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({
+    supabaseClient,
+    nettuClient: {},
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+    assistantModel: whatsappAgentModel("Sure, I can help with that."),
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "hi", MessageSid: "SM-premium-1" }),
+    });
+    assert.equal(response.status, 200);
+    const outbound = supabaseClient._tables.ChatMsg.find((m) => m.direction === "outbound");
+    assert.equal(outbound.body, "Sure, I can help with that.");
+  });
+});
+
+test("POST /webhooks/twilio/whatsapp-inbound: custom plan without the ai_whatsapp_agent addon gets the fallback, with it gets the AI agent", async () => {
+  const twilioClient = createTwilioStub();
+
+  await withServer(
+    createApp({
+      supabaseClient: createTableStub({
+        Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398", plan: { planId: "custom", addonIds: ["smart_ivr"] } }],
+      }),
+      nettuClient: null,
+      firebaseAdminApp: null,
+      stripeClient: null,
+      openaiClient: null,
+      twilioClient,
+      assistantModel: new MockLanguageModelV3({
+        doGenerate: async () => {
+          throw new Error("must not run without the ai_whatsapp_agent addon");
+        },
+      }),
+    }),
+    async ({ request }) => {
+      const response = await request("/webhooks/twilio/whatsapp-inbound", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+        body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "hi", MessageSid: "SM-custom-no-addon" }),
+      });
+      assert.equal(response.status, 200);
+    },
+  );
+
+  const supabaseClientWithAddon = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398", plan: { planId: "custom", addonIds: ["ai_whatsapp_agent"] } }],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true }],
+  });
+  await withServer(
+    createApp({
+      supabaseClient: supabaseClientWithAddon,
+      nettuClient: {},
+      firebaseAdminApp: null,
+      stripeClient: null,
+      openaiClient: null,
+      twilioClient,
+      assistantModel: whatsappAgentModel("Here's your appointment info."),
+    }),
+    async ({ request }) => {
+      const response = await request("/webhooks/twilio/whatsapp-inbound", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+        body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "hi", MessageSid: "SM-custom-with-addon" }),
+      });
+      assert.equal(response.status, 200);
+      const outbound = supabaseClientWithAddon._tables.ChatMsg.find((m) => m.direction === "outbound");
+      assert.equal(outbound.body, "Here's your appointment info.");
+    },
+  );
 });
 
 // ─── /webhooks/stripe ────────────────────────────────────────────────────────

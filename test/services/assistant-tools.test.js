@@ -247,8 +247,14 @@ describe("find_next_free_slot", () => {
   // earlier version of this test used) can disagree with that near a day
   // boundary, exactly the class of bug this session already found and fixed
   // in the app itself (see api-v1-assistant.js's "already passed" fix).
+  // Starts from TOMORROW, not today: resolveBookingWindow's minNoticeHours
+  // clamp compares the requested day's UTC midnight against the precise
+  // current instant, so "today" itself reads as already-past the moment any
+  // time at all has elapsed today — a real (separate, pre-existing) product
+  // question about same-day booking, not something this test is about.
   function nextDateWithWeekday(targetShort, { avoid = false } = {}) {
     let d = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + 1);
     for (let i = 0; i < 14; i++) {
       const wd = d.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
       if (avoid ? wd !== targetShort : wd === targetShort) return d.toISOString().slice(0, 10);
@@ -417,9 +423,23 @@ describe("notify_appointment_delay", () => {
   // against the live deployed assistant with a real appointment stored
   // under this exact boundary condition.
 
+  // A bare "+N minutes from now" can drift past IST midnight depending on
+  // real wall-clock time when the test happens to run — correctly excluded
+  // by notify_appointment_delay's own day-boundary logic (that's the point
+  // of the fix above), but this test wants both fixtures to reliably land
+  // "today" regardless of when it runs, so clamp to a few minutes before
+  // the clinic's actual local midnight if the naive offset would cross it.
+  function minutesFromNowStayingWithinIstToday(minutes) {
+    const naive = Date.now() + minutes * 60 * 1000;
+    const istMidnightTonight = new Date(
+      `${new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10)}T18:30:00.000Z`, // next IST midnight, in UTC
+    ).getTime();
+    return new Date(Math.min(naive, istMidnightTonight - 5 * 60 * 1000)).toISOString();
+  }
+
   test("notifies every upcoming patient for the doctor today by default", async () => {
-    const soon = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-    const later = new Date(Date.now() + 90 * 60 * 1000).toISOString();
+    const soon = minutesFromNowStayingWithinIstToday(30);
+    const later = minutesFromNowStayingWithinIstToday(90);
     const supabaseClient = createTableStub(makeTables({
       Appointment: [
         { id: "today-1", clinicId: CLINIC_ID, doctorId: "doc-1", patientId: "pat-1", timeslot: soon, status: "booked" },

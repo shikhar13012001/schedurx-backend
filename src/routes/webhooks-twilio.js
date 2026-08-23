@@ -32,6 +32,7 @@ const messagingSvc = require("../services/messaging-service");
 const tableSvc = require("../services/table-service");
 const whatsappAgentSvc = require("../services/whatsapp-agent-service");
 const openaiSvc = require("../services/openai-service");
+const plansSvc = require("../lib/plans");
 const crypto = require("node:crypto");
 const { config } = require("../config");
 
@@ -110,6 +111,28 @@ async function classifyAndStoreTriage(supabaseClient, openaiClient, threadId, bo
   } catch (err) {
     log?.warn({ err, threadId }, "[webhooks:twilio] triage classification failed");
   }
+}
+
+// The non-conversational-AI reply for a clinic whose plan doesn't include
+// whatsappConversationalAi (basic, or custom without the ai_whatsapp_agent
+// addon) — every plan still gets whatsappStructuredBooking per
+// entitlementsForPlan(), so this is the "dropdown/CTA-based" flow the raw
+// request asked for, not a silent drop to empty-reply. This is a same-session
+// TwiML reply (the patient just messaged in), not a business-initiated send,
+// so it doesn't need a Meta Content Template the way a cold outbound message
+// would — sendTemplatedMessage's contentSid path is for outside-24h-session
+// sends, which this isn't.
+function buildStructuredFallbackReply(clinic, callerPhone) {
+  const selfServiceUrl = config.PATIENT_APP_BASE_URL
+    ? `${config.PATIENT_APP_BASE_URL}/${clinic.id}/${encodeURIComponent(callerPhone)}`
+    : null;
+  const lines = [
+    `Thanks for messaging ${clinic.name ?? "our clinic"}! Our team will get back to you shortly.`,
+  ];
+  if (selfServiceUrl) {
+    lines.push(`To book, reschedule, or cancel an appointment yourself right now: ${selfServiceUrl}`);
+  }
+  return lines.join(" ");
 }
 
 function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, assistantModel, openaiClient, elevenLabsClient }) {
@@ -302,7 +325,20 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
       });
       await classifyAndStoreTriage(supabaseClient, openaiClient, thread.id, body, req.log);
 
-      if (!assistantModel) return emptyReply();
+      // Plan-gated: the full conversational agent only runs for clinics whose
+      // plan actually includes it (premium, or custom + ai_whatsapp_agent) —
+      // entitlementsForPlan already modeled this split, it just wasn't read
+      // anywhere before now. Every clinic still gets *some* reply via the
+      // structured fallback rather than silently going quiet.
+      const entitlements = plansSvc.entitlementsForPlan(clinic.plan?.planId, clinic.plan?.addonIds);
+      if (!assistantModel || !entitlements.whatsappConversationalAi) {
+        if (!entitlements.whatsappStructuredBooking) return emptyReply();
+        const replyText = buildStructuredFallbackReply(clinic, from);
+        await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
+        const twiml = new MessagingResponse();
+        twiml.message(replyText);
+        return res.type("text/xml").send(twiml.toString());
+      }
 
       const replyText = await whatsappAgentSvc.respondToPatientMessage(
         { supabaseClient, nettuClient, twilioClient, assistantModel, clinic, patient, thread },
