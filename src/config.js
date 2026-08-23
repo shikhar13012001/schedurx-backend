@@ -55,6 +55,29 @@ const schema = z.object({
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
 
+  // ── Stripe recurring subscription Price ids — real, human-created in the
+  // Stripe Dashboard (test mode first), never invented here. Each is
+  // independently optional: a clinic can only subscribe to a plan/addon
+  // whose Price id is actually set, and the checkout-session route fails
+  // gracefully (STRIPE_PRICE_NOT_CONFIGURED, matching STRIPE_NOT_CONFIGURED's
+  // shape) for anything still missing rather than fabricating an id.
+  STRIPE_PRICE_BASIC: z.string().optional(),
+  STRIPE_PRICE_PREMIUM: z.string().optional(),
+  STRIPE_PRICE_CUSTOM_BASE: z.string().optional(),
+  STRIPE_PRICE_ADDON_ONLINE_CONSULTATIONS: z.string().optional(),
+  STRIPE_PRICE_ADDON_SMART_IVR: z.string().optional(),
+  STRIPE_PRICE_ADDON_AI_CALLING_AGENT: z.string().optional(),
+  STRIPE_PRICE_ADDON_AI_WHATSAPP_AGENT: z.string().optional(),
+  STRIPE_PRICE_ADDON_RECORDED_CALL_REMINDERS: z.string().optional(),
+  STRIPE_PRICE_ADDON_AI_FOLLOWUP_AGENT: z.string().optional(),
+  STRIPE_PRICE_ADDON_AMBIENT_LISTENING: z.string().optional(),
+  STRIPE_PRICE_ADDON_PREMIUM_WEBSITE: z.string().optional(),
+
+  // Optional non-default Stripe Billing Portal configuration id (Dashboard >
+  // Settings > Billing > Customer portal). Left unset, portal sessions use
+  // the account's default configuration.
+  STRIPE_PORTAL_CONFIGURATION_ID: z.string().optional(),
+
   // ── OpenAI — /api/v1/ai stays unmounted without this.
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default("gpt-4o-mini"),

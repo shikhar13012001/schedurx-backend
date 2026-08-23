@@ -8,6 +8,15 @@ process.env.SUPABASE_URL = "https://example.supabase.co";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role-key";
 process.env.NETTU_BASE_URL = "https://nettu.example.test";
 process.env.NETTU_API_KEY = "nettu-api-key";
+// Deliberately set for basic/premium/one addon only, left unset for the
+// custom-base plan and the rest — exercises both the "configured" and
+// "STRIPE_PRICE_NOT_CONFIGURED" paths of the subscription billing routes
+// without fabricating every Stripe Price id. Must be set before src/app is
+// first required below — config.js parses process.env once, at first import,
+// and caches the result for the rest of this process.
+process.env.STRIPE_PRICE_BASIC = "price_basic_test";
+process.env.STRIPE_PRICE_PREMIUM = "price_premium_test";
+process.env.STRIPE_PRICE_ADDON_AI_WHATSAPP_AGENT = "price_addon_wa_test";
 
 const { createApp } = require("../../src/app");
 const { createTableStub } = require("../helpers/supabase-table-stub");
@@ -2151,6 +2160,191 @@ test("POST /webhooks/twilio/whatsapp-inbound: custom plan without the ai_whatsap
   );
 });
 
+// ─── /api/v1/billing/subscription ───────────────────────────────────────────
+
+function ownerApp(supabaseClient, stripeClient) {
+  return createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: createFirebaseAdminStub({
+      decodedToken: { uid: "staff-owner", role: "owner", clinicId: "clinic-1", doctorId: null },
+    }),
+    stripeClient,
+    openaiClient: null,
+  });
+}
+
+function receptionistApp(supabaseClient, stripeClient) {
+  return createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: createFirebaseAdminStub({
+      decodedToken: { uid: "staff-reception", role: "receptionist", clinicId: "clinic-1", doctorId: null },
+    }),
+    stripeClient,
+    openaiClient: null,
+  });
+}
+
+test("GET /api/v1/billing/subscription returns a summary for the caller's own clinic, owner-only", async () => {
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true }],
+    Clinic: [
+      {
+        id: "clinic-1",
+        status: "active",
+        plan: { planId: "premium", addonIds: [] },
+        stripeCustomerId: "cus_1",
+        stripeSubscriptionId: "sub_1",
+        subscriptionStatus: "active",
+        subscriptionCurrentPeriodEnd: "2026-09-01T00:00:00.000Z",
+        subscriptionItems: { base: {}, addons: {} },
+      },
+    ],
+  });
+
+  await withServer(ownerApp(supabaseClient, createStripeStub()), async ({ request }) => {
+    const response = await request("/api/v1/billing/subscription", { headers: { Authorization: "Bearer anything" } });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.subscriptionStatus, "active");
+    assert.equal(body.data.plan.planId, "premium");
+  });
+
+  await withServer(receptionistApp(supabaseClient, createStripeStub()), async ({ request }) => {
+    const response = await request("/api/v1/billing/subscription", { headers: { Authorization: "Bearer anything" } });
+    assert.equal(response.status, 403);
+  });
+});
+
+test("POST /api/v1/billing/subscription/checkout-session fails gracefully when the Stripe Price isn't configured", async () => {
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true }],
+    Clinic: [{ id: "clinic-1", status: "active" }],
+  });
+
+  await withServer(ownerApp(supabaseClient, createStripeStub()), async ({ request }) => {
+    // STRIPE_PRICE_CUSTOM_BASE is deliberately left unset in this test run.
+    const response = await request("/api/v1/billing/subscription/checkout-session", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ planId: "custom", addonIds: [], successUrl: "https://app/ok", cancelUrl: "https://app/cancel" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 503);
+    assert.equal(body.error.code, "STRIPE_PRICE_NOT_CONFIGURED");
+  });
+});
+
+test("POST /api/v1/billing/subscription/checkout-session creates a Stripe customer and returns a checkout URL for a configured plan", async () => {
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true }],
+    Clinic: [{ id: "clinic-1", status: "active", name: "Nirmaya Clinic" }],
+  });
+  const stripeClient = createStripeStub({
+    customer: { id: "cus_new" },
+    session: { id: "cs_sub_1", url: "https://checkout.stripe.com/sub_1" },
+  });
+
+  await withServer(ownerApp(supabaseClient, stripeClient), async ({ request }) => {
+    const response = await request("/api/v1/billing/subscription/checkout-session", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ planId: "premium", successUrl: "https://app/ok", cancelUrl: "https://app/cancel" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/sub_1");
+  });
+
+  assert.equal(supabaseClient._tables.Clinic[0].stripeCustomerId, "cus_new");
+});
+
+test("POST /api/v1/billing/subscription/portal-session requires an existing Stripe customer", async () => {
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true }],
+    Clinic: [{ id: "clinic-1", status: "active" }],
+  });
+
+  await withServer(ownerApp(supabaseClient, createStripeStub()), async ({ request }) => {
+    const response = await request("/api/v1/billing/subscription/portal-session", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ returnUrl: "https://app/account" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 409);
+    assert.equal(body.error.code, "NO_SUBSCRIPTION");
+  });
+});
+
+test("POST /api/v1/billing/subscription/portal-session returns a portal URL once a Stripe customer exists", async () => {
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true }],
+    Clinic: [{ id: "clinic-1", status: "active", stripeCustomerId: "cus_1" }],
+  });
+  const stripeClient = createStripeStub({ portalSession: { id: "bps_1", url: "https://billing.stripe.com/p/1" } });
+
+  await withServer(ownerApp(supabaseClient, stripeClient), async ({ request }) => {
+    const response = await request("/api/v1/billing/subscription/portal-session", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ returnUrl: "https://app/account" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.url, "https://billing.stripe.com/p/1");
+  });
+});
+
+test("POST /api/v1/billing/subscription/addons only applies to the custom plan", async () => {
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true }],
+    Clinic: [{ id: "clinic-1", status: "active", plan: { planId: "premium", addonIds: [] } }],
+  });
+
+  await withServer(ownerApp(supabaseClient, createStripeStub()), async ({ request }) => {
+    const response = await request("/api/v1/billing/subscription/addons", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ addonId: "ai_whatsapp_agent", action: "add" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 422);
+    assert.equal(body.error.code, "INVALID_ADDON");
+  });
+});
+
+test("POST /api/v1/billing/subscription/addons adds a subscription item and updates Clinic.plan.addonIds", async () => {
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true }],
+    Clinic: [
+      {
+        id: "clinic-1",
+        status: "active",
+        plan: { planId: "custom", addonIds: [] },
+        stripeSubscriptionId: "sub_1",
+        subscriptionItems: {},
+      },
+    ],
+  });
+  const stripeClient = createStripeStub({ subscriptionItem: { id: "si_wa_1" } });
+
+  await withServer(ownerApp(supabaseClient, stripeClient), async ({ request }) => {
+    const response = await request("/api/v1/billing/subscription/addons", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ addonId: "ai_whatsapp_agent", action: "add" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.data.addons, ["ai_whatsapp_agent"]);
+    assert.deepEqual(body.data.plan.addonIds, ["ai_whatsapp_agent"]);
+  });
+
+  assert.equal(supabaseClient._tables.Clinic[0].subscriptionItems.addons.ai_whatsapp_agent.itemId, "si_wa_1");
+});
+
 // ─── /webhooks/stripe ────────────────────────────────────────────────────────
 
 test("POST /webhooks/stripe rejects a bad signature and accepts a valid event", async () => {
@@ -2196,6 +2390,104 @@ test("POST /webhooks/stripe rejects a bad signature and accepts a valid event", 
     assert.deepEqual(body, { received: true });
     assert.equal(supabaseClient._tables.Invoice[0].status, "paid");
   });
+});
+
+test("POST /webhooks/stripe customer.subscription.created syncs status, period end, and Clinic.plan", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", stripeCustomerId: "cus_1", plan: null, subscriptionItems: null }],
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    stripeClient: createStripeStub({
+      event: {
+        type: "customer.subscription.created",
+        data: {
+          object: {
+            id: "sub_1",
+            customer: "cus_1",
+            status: "active",
+            current_period_end: 1_800_000_000,
+            metadata: { clinicId: "clinic-1", planId: "premium", addonIds: "[]" },
+            items: { data: [{ id: "si_base_1", price: { id: "price_premium_test" }, current_period_end: 1_800_000_000 }] },
+          },
+        },
+      },
+    }),
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/stripe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "stripe-signature": "valid" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  const clinic = supabaseClient._tables.Clinic[0];
+  assert.equal(clinic.stripeSubscriptionId, "sub_1");
+  assert.equal(clinic.subscriptionStatus, "active");
+  assert.equal(clinic.plan.planId, "premium");
+  assert.equal(clinic.subscriptionItems.base.itemId, "si_base_1");
+});
+
+test("POST /webhooks/stripe customer.subscription.deleted marks the clinic canceled", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", stripeCustomerId: "cus_1", stripeSubscriptionId: "sub_1", subscriptionStatus: "active", subscriptionItems: { base: { itemId: "si_1" }, addons: {} } }],
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    stripeClient: createStripeStub({
+      event: {
+        type: "customer.subscription.deleted",
+        data: { object: { id: "sub_1", customer: "cus_1", status: "canceled", current_period_end: null, items: { data: [] } } },
+      },
+    }),
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/stripe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "stripe-signature": "valid" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.equal(supabaseClient._tables.Clinic[0].subscriptionStatus, "canceled");
+});
+
+test("POST /webhooks/stripe invoice.payment_failed broadcasts a clinic-wide notification", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", stripeCustomerId: "cus_1" }],
+    Notification: [],
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    stripeClient: createStripeStub({
+      event: {
+        type: "invoice.payment_failed",
+        data: { object: { id: "in_1", customer: "cus_1" } },
+      },
+    }),
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/stripe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "stripe-signature": "valid" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  assert.equal(supabaseClient._tables.Notification.length, 1);
+  assert.equal(supabaseClient._tables.Notification[0].clinicId, "clinic-1");
+  assert.equal(supabaseClient._tables.Notification[0].staffId, null);
+  assert.equal(supabaseClient._tables.Notification[0].type, "billing_payment_failed");
 });
 
 // ─── /api/v1/public (schedurx-form-agent's booking API) ────────────────────────

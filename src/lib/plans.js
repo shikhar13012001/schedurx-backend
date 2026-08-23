@@ -49,6 +49,36 @@ const ADDONS = {
   premium_website: { id: "premium_website", name: "Premium Website", monthlyPaise: 39900 },
 };
 
+// Env var each plan/addon's real Stripe Price id lives in — kept as a
+// separate lazy-lookup table (rather than a `stripePriceId` field baked into
+// PLANS/ADDONS above) so requiring this module never requires ../config at
+// load time. plans.js is required from contexts (like its own unit tests)
+// that don't set every env var config.js's schema requires, and this module
+// needs to stay loadable there — only callers that actually ask for a
+// Stripe price id pay the cost of loading config.
+const STRIPE_PRICE_ENV_KEY = {
+  basic: "STRIPE_PRICE_BASIC",
+  premium: "STRIPE_PRICE_PREMIUM",
+  custom: "STRIPE_PRICE_CUSTOM_BASE",
+  online_consultations: "STRIPE_PRICE_ADDON_ONLINE_CONSULTATIONS",
+  smart_ivr: "STRIPE_PRICE_ADDON_SMART_IVR",
+  ai_calling_agent: "STRIPE_PRICE_ADDON_AI_CALLING_AGENT",
+  ai_whatsapp_agent: "STRIPE_PRICE_ADDON_AI_WHATSAPP_AGENT",
+  recorded_call_reminders: "STRIPE_PRICE_ADDON_RECORDED_CALL_REMINDERS",
+  ai_followup_agent: "STRIPE_PRICE_ADDON_AI_FOLLOWUP_AGENT",
+  ambient_listening: "STRIPE_PRICE_ADDON_AMBIENT_LISTENING",
+  premium_website: "STRIPE_PRICE_ADDON_PREMIUM_WEBSITE",
+};
+
+// Real Stripe Price id for a planId or addonId, or null if that env var
+// isn't set. Never fabricates an id.
+function stripePriceIdFor(planOrAddonId) {
+  const envKey = STRIPE_PRICE_ENV_KEY[planOrAddonId];
+  if (!envKey) return null;
+  const { config } = require("../config");
+  return config[envKey] ?? null;
+}
+
 // Recharge packs shown once a real wallet exists — kept here now so the
 // numbers live in one place from day one rather than being invented twice.
 const CREDIT_PACKS = [
@@ -122,6 +152,24 @@ function entitlementsForPlan(planId, addonIds = []) {
   };
 }
 
+// Which real Stripe Price ids a subscription checkout for this plan/addon
+// selection would need, that aren't actually configured yet — empty array
+// means the selection is fully ready to bill. Callers use this to fail
+// gracefully (STRIPE_PRICE_NOT_CONFIGURED) instead of sending Stripe a
+// request with an undefined price.
+function missingStripePriceIds(planId, addonIds = []) {
+  if (!PLANS[planId]) throw Object.assign(new Error(`Unknown plan '${planId}'`), { code: "INVALID_PLAN", statusCode: 422 });
+  const missing = [];
+  if (!stripePriceIdFor(planId)) missing.push(planId);
+  if (planId === "custom") {
+    addonIds.forEach((id) => {
+      addon(id); // throws on any unknown id
+      if (!stripePriceIdFor(id)) missing.push(id);
+    });
+  }
+  return missing;
+}
+
 function validatePlanSelection({ planId, addonIds }) {
   if (!PLAN_IDS.includes(planId)) {
     throw Object.assign(new Error(`Unknown plan '${planId}'`), { code: "INVALID_PLAN", statusCode: 422 });
@@ -146,4 +194,6 @@ module.exports = {
   estimateMonthlyPaise,
   entitlementsForPlan,
   validatePlanSelection,
+  missingStripePriceIds,
+  stripePriceIdFor,
 };

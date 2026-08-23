@@ -301,7 +301,7 @@ async function updateClinicCallForwarding(supabaseClient, clinicId, { carrier, s
   return data.callForwarding;
 }
 
-const ONBOARDING_STEPS = ["you", "clinic", "plan", "calls", "team", "completed"];
+const ONBOARDING_STEPS = ["you", "clinic", "plan", "payment", "calls", "team", "completed"];
 
 async function advanceClinicOnboardingStep(supabaseClient, clinicId, step) {
   if (!ONBOARDING_STEPS.includes(step)) {
