@@ -227,7 +227,7 @@ describe("sendImmediateWorkflowMessages", () => {
     assert.match(twilioClient.calls.sendSms[0].body, /chat: https:\/\/wa\.me\/14155238886\?text=BOOKING%20apt_1/);
   });
 
-  test("records a failed status without throwing when the send errors", async () => {
+  test("records a failed status without throwing when the send errors, and queues a retry", async () => {
     const supabaseClient = createTableStub();
     const twilioClient = createTwilioStub({ shouldFailSend: true });
     const clinic = makeClinic({
@@ -253,6 +253,51 @@ describe("sendImmediateWorkflowMessages", () => {
     );
 
     assert.equal(supabaseClient._tables.Reminder[0].status, "failed");
+
+    // The stub's generic "Twilio SMS send failed" error carries no Twilio
+    // error code, so it's treated as transient (see failed-message-service.js's
+    // isRetryableError) and worth queuing a retry for.
+    assert.equal(supabaseClient._tables.FailedMessage.length, 1);
+    const queued = supabaseClient._tables.FailedMessage[0];
+    assert.equal(queued.toPhone, "+919888888888");
+    assert.equal(queued.channel, "sms");
+    assert.equal(queued.purpose, "cancellation");
+    assert.equal(queued.status, "pending");
+  });
+
+  test("does not queue a retry for a terminal error (e.g. outside the WhatsApp session window)", async () => {
+    const supabaseClient = createTableStub({ FailedMessage: [] });
+    const terminalErr = Object.assign(new Error("outside allowed window"), { code: "63016" });
+    const twilioClient = {
+      calls: { sendSms: [], sendWhatsApp: [] },
+      async sendWhatsApp() {
+        throw terminalErr;
+      },
+    };
+    const clinic = makeClinic({
+      settings: {
+        communication: {
+          channelsEnabled: ["whatsapp"],
+          workflows: [{ id: "x", trigger: "booking_confirmed", channel: "whatsapp", enabled: true, contentSid: "HXtest", contentVariables: ["patientName"] }],
+        },
+      },
+    });
+
+    await sendImmediateWorkflowMessages(
+      {
+        supabaseClient,
+        twilioClient,
+        clinic,
+        trigger: "booking_confirmed",
+        appointmentId: "apt_1",
+        toPhone: "+919888888888",
+        data: { patientName: "Rahul" },
+      },
+      null,
+    );
+
+    assert.equal(supabaseClient._tables.Reminder[0].status, "failed");
+    assert.equal(supabaseClient._tables.FailedMessage.length, 0, "a 63016 failure will fail again for the same reason — must not queue a pointless retry");
   });
 });
 

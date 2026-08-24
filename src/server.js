@@ -205,6 +205,18 @@ async function start() {
     });
   }, 5 * 60_000).unref();
 
+  // Retries transient send failures (rate limits, brief Twilio/network
+  // blips) on the backoff schedule failed-message-service.js defines — see
+  // that file for why terminal failures (e.g. 63016) are never queued here
+  // in the first place. Shorter interval than the backoff steps themselves
+  // (5min/30min/2h) so a due retry doesn't sit waiting on this tick alone.
+  const failedMessageSvc = require("./services/failed-message-service");
+  setInterval(() => {
+    failedMessageSvc.processDue(supabaseClient, twilioClient, logger).catch((err) => {
+      logger.error({ err }, "[startup] failed-message retry tick failed");
+    });
+  }, 2 * 60_000).unref();
+
   registerShutdownHandlers(server);
 }
 

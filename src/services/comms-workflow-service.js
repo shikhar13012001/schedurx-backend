@@ -40,6 +40,8 @@
 const { makeId } = require("../lib/ids");
 const clinicSvc = require("./clinic-service");
 const messagingSvc = require("./messaging-service");
+const failedMessageSvc = require("./failed-message-service");
+const { renderTemplate } = require("../lib/template");
 const { formatHumanTime } = require("./availability-service");
 
 const IMMEDIATE_TRIGGERS = new Set(["booking_confirmed", "reschedule", "cancellation"]);
@@ -145,6 +147,29 @@ async function sendAndTrack({ supabaseClient, twilioClient, workflow, appointmen
         "[commsWorkflowSvc] failed to record failed send",
       );
     }
+
+    // Queued only when the failure looks transient (enqueue itself checks —
+    // see failed-message-service.js's isRetryableError) — a 63016
+    // outside-session-window failure would just fail the exact same way
+    // again, so retrying it would be pure waste, not resilience.
+    const resolvedContentVariables = workflow.contentSid
+      ? Object.fromEntries((workflow.contentVariables ?? []).map((key, idx) => [String(idx + 1), fullData?.[key] != null ? String(fullData[key]) : ""]))
+      : undefined;
+    await failedMessageSvc.enqueue(
+      supabaseClient,
+      {
+        clinicId,
+        channel: workflow.channel,
+        toPhone,
+        fromPhone: from,
+        body: workflow.contentSid ? undefined : renderTemplate(workflow.template, fullData),
+        contentSid: workflow.contentSid,
+        contentVariables: resolvedContentVariables,
+        purpose: workflow.trigger,
+        error: err,
+      },
+      log,
+    );
   }
 }
 

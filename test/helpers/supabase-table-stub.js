@@ -11,6 +11,7 @@ function matches(row, filters) {
     if (op === "neq") return row[col] !== val;
     if (op === "gte") return row[col] >= val;
     if (op === "lt") return row[col] < val;
+    if (op === "lte") return row[col] <= val;
     if (op === "is" && val === null) return row[col] == null;
     if (op === "in") return Array.isArray(val) && val.includes(row[col]);
     if (op === "ilike") return matchesIlike(row[col], val);
@@ -87,6 +88,10 @@ function createTableStub(initialTables = {}) {
       },
       lt(col, val) {
         filters.push(["lt", col, val]);
+        return this;
+      },
+      lte(col, val) {
+        filters.push(["lte", col, val]);
         return this;
       },
       is(col, val) {
