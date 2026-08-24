@@ -21,7 +21,7 @@ function createTwilioClient({ accountSid, authToken, smsFrom, whatsappFrom, stat
   // failed, since it didn't.
   function logSent(result, { channel, to, clinicId, purpose }) {
     if (!onMessageSent) return;
-    Promise.resolve(onMessageSent({ sid: result.sid, channel, to, clinicId, purpose, initialStatus: result.status })).catch(() => {});
+    Promise.resolve(onMessageSent({ sid: result.sid, channel, toPhone: to, clinicId, purpose, initialStatus: result.status })).catch(() => {});
   }
 
   return {
