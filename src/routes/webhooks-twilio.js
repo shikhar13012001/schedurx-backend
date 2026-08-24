@@ -434,7 +434,18 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
       // /voice resolves the receiving phone number — a shared Twilio
       // account can send/receive on behalf of more than one clinic's
       // WhatsApp sender, so this can't assume a single fixed clinic.
-      let { data: clinic } = await supabaseClient.from("Clinic").select("*").eq("whatsappFrom", to).maybeSingle();
+      // .maybeSingle() errors (does not throw) when 2+ clinics share this
+      // whatsappFrom — expected once more than one clinic uses the shared
+      // platform default (see the comment below); `data` comes back null
+      // either way, so this already falls through to the phone-based
+      // fallback correctly, but the error itself was previously silently
+      // dropped — logged now (debug, not warn — this is routine, not
+      // actionable) purely so a genuine unexpected DB error here doesn't
+      // look identical to "no exact match" if it's ever worth debugging.
+      let { data: clinic, error: clinicLookupErr } = await supabaseClient.from("Clinic").select("*").eq("whatsappFrom", to).maybeSingle();
+      if (clinicLookupErr) {
+        req.log?.debug({ err: clinicLookupErr, to }, "[webhooks:twilio] whatsappFrom exact-match lookup didn't resolve to one row — falling back to phone-based resolution");
+      }
 
       // In practice almost no clinic has its own dedicated whatsappFrom yet —
       // they all share the one platform number, so the exact match above

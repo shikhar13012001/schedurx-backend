@@ -37,10 +37,11 @@
 //   EVAL_BASE_URL=http://139.59.34.211:4000 node scripts/eval-whatsapp-agent.js
 //   (defaults to http://139.59.34.211:4000 — the droplet — if unset)
 //
-// Reads TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_WHATSAPP_FROM,
-// SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY, NETTU_BASE_URL/NETTU_API_KEY,
-// INTERNAL_API_KEY, FIREBASE_* (for /internal/clinic's Firebase claim set)
-// from .env exactly like the real server does.
+// Reads TWILIO_AUTH_TOKEN, SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY,
+// NETTU_BASE_URL/NETTU_API_KEY, INTERNAL_API_KEY, FIREBASE_* (for the
+// throwaway Firebase user + /internal/clinic's claim set) from .env exactly
+// like the real server does. Does NOT use TWILIO_WHATSAPP_FROM — see
+// EVAL_WHATSAPP_TO's comment for why.
 
 require("dotenv").config();
 const crypto = require("node:crypto");
@@ -52,14 +53,29 @@ const calendarSvc = require("../src/services/calendar-service");
 
 const BASE_URL = process.env.EVAL_BASE_URL || "http://139.59.34.211:4000";
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
+// Real Twilio account-level secret — needed to compute a genuinely valid
+// signature (webhooks-twilio.js's verify middleware checks it), but this is
+// account-wide, not number-specific, so using the real one here carries no
+// collision risk.
 const AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM;
+// Deliberately NOT process.env.TWILIO_WHATSAPP_FROM — that's the real
+// shared platform number every clinic without its own dedicated sender
+// falls back to (see config.js's comment), and a real clinic
+// ("poc-clinic-001") already has it as Clinic.whatsappFrom. Assigning the
+// eval clinic that same number caused a genuine collision on a live run —
+// two clinics with the same whatsappFrom broke exact-match resolution for
+// BOTH, silently, for the whole duration of the eval, which could have
+// misrouted real inbound WhatsApp traffic to the real clinic too. A
+// clearly-fake, dedicated number for the eval clinic avoids that entirely —
+// Twilio's signature is just an HMAC over the URL+params, so any string
+// works as long as it's used consistently.
+const EVAL_WHATSAPP_TO = "+15550001234";
 const TEST_CLINIC_NAME = "[E2E] Adversarial Eval Clinic";
 const PATIENT_A_PHONE = "+919000000001"; // this scenario matrix's primary caller
 const PATIENT_B_PHONE = "+919000000002"; // a second, unrelated patient (isolation probes)
 
-if (!INTERNAL_API_KEY || !AUTH_TOKEN || !WHATSAPP_FROM) {
-  console.error("Missing INTERNAL_API_KEY / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM in .env — cannot run.");
+if (!INTERNAL_API_KEY || !AUTH_TOKEN) {
+  console.error("Missing INTERNAL_API_KEY / TWILIO_AUTH_TOKEN in .env — cannot run.");
   process.exit(1);
 }
 
@@ -154,7 +170,7 @@ async function setupClinic() {
   const supabaseClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  await supabaseClient.from("Clinic").update({ whatsappFrom: WHATSAPP_FROM }).eq("id", clinic.id);
+  await supabaseClient.from("Clinic").update({ whatsappFrom: EVAL_WHATSAPP_TO }).eq("id", clinic.id);
 
   // Second doctor — no HTTP route creates an additional doctor on an
   // existing clinic today, so this one step calls the service functions
@@ -380,7 +396,7 @@ async function main() {
   console.log(`[eval] target: ${BASE_URL}`);
   console.log("[eval] setting up throwaway clinic...");
   const ctx = await setupClinic();
-  ctx.whatsappFrom = WHATSAPP_FROM;
+  ctx.whatsappFrom = EVAL_WHATSAPP_TO;
   await setPlan(ctx.supabaseClient, ctx.clinicId, { planId: "premium", addonIds: [] });
   console.log(`[eval] clinic ${ctx.clinicId} ready — doctors ${ctx.doctorOneId}, ${ctx.doctorTwoId}`);
 
