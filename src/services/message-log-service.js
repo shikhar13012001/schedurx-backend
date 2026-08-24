@@ -25,7 +25,7 @@ async function recordSent(supabaseClient, { sid, clinicId, channel, toPhone, pur
   if (error) throw Object.assign(new Error(`DB error recording message log: ${error.message}`), { code: "DATABASE_ERROR" });
 }
 
-// Called from the /webhooks/twilio/status-callback route as Twilio reports
+// Called from the /webhooks/twilio/message-status route as Twilio reports
 // status transitions (queued -> sent -> delivered/undelivered/failed, or
 // -> read for WhatsApp). A callback for a sid we never logged (e.g. a send
 // from before this migration, or from a code path not yet wired to

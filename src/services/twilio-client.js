@@ -14,7 +14,7 @@ const twilio = require("twilio");
 // sends still work exactly as before — this is additive, not a requirement.
 function createTwilioClient({ accountSid, authToken, smsFrom, whatsappFrom, statusCallbackBaseUrl, onMessageSent }) {
   const client = twilio(accountSid, authToken);
-  const statusCallback = statusCallbackBaseUrl ? `${statusCallbackBaseUrl}/webhooks/twilio/status-callback` : undefined;
+  const statusCallback = statusCallbackBaseUrl ? `${statusCallbackBaseUrl}/webhooks/twilio/message-status` : undefined;
 
   // Fire-and-forget by design (see recordSent's own comment) — a MessageLog
   // write failing must never make the caller think the actual Twilio send
