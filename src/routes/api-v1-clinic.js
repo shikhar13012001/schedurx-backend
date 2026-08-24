@@ -29,6 +29,8 @@ function createApiV1ClinicRouter(supabaseClient) {
           openingHour: clinic.openingHour,
           closingHour: clinic.closingHour,
           googleReviewUrl: clinic.googleReviewUrl ?? null,
+          tokenMoneyEnabled: clinic.tokenMoneyEnabled ?? false,
+          tokenAmountPaise: clinic.tokenAmountPaise ?? null,
         },
       });
     } catch (err) {
@@ -40,7 +42,13 @@ function createApiV1ClinicRouter(supabaseClient) {
   router.patch("/", requireRole("owner"), async (req, res) => {
     try {
       const clinic = await clinicSvc.updateClinicProfile(supabaseClient, req.staff.clinicId, req.body ?? {});
-      return ok(res, { clinic: { googleReviewUrl: clinic.googleReviewUrl ?? null } });
+      return ok(res, {
+        clinic: {
+          googleReviewUrl: clinic.googleReviewUrl ?? null,
+          tokenMoneyEnabled: clinic.tokenMoneyEnabled ?? false,
+          tokenAmountPaise: clinic.tokenAmountPaise ?? null,
+        },
+      });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:clinic] update failed");
       return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
