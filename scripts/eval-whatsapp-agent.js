@@ -103,11 +103,33 @@ async function sendWhatsApp({ from, to, body, messageSid }) {
 
 // ─── Setup / teardown ───────────────────────────────────────────────────────
 
+// /internal/clinic's firebaseAdminApp.setCustomUserClaims() operates on an
+// EXISTING Firebase Auth user — it doesn't create one — so a random uid
+// fails with auth/user-not-found. Creates a real throwaway Firebase user for
+// this run; teardownClinic deletes it (same self-cleaning spirit as the
+// clinic itself, via TEST_CLINIC_NAME_PREFIX).
+function buildFirebaseAdminAuth() {
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY_BASE64
+    ? Buffer.from(process.env.FIREBASE_PRIVATE_KEY_BASE64, "base64").toString("utf8")
+    : process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  if (!process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_CLIENT_EMAIL || !privateKey) {
+    throw new Error("FIREBASE_PROJECT_ID/FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY(_BASE64) must be set to run this eval.");
+  }
+  const { cert, initializeApp } = require("firebase-admin/app");
+  const { getAuth } = require("firebase-admin/auth");
+  const app = initializeApp({ credential: cert({ projectId: process.env.FIREBASE_PROJECT_ID, clientEmail: process.env.FIREBASE_CLIENT_EMAIL, privateKey }) }, `eval-${Date.now()}`);
+  return getAuth(app);
+}
+
 async function setupClinic() {
-  const firebaseUid = `e2e-eval-${crypto.randomUUID()}`;
+  const firebaseAdminAuth = buildFirebaseAdminAuth();
+  const evalEmail = `eval-${crypto.randomUUID()}@schedurx.test`;
+  const firebaseUser = await firebaseAdminAuth.createUser({ email: evalEmail, emailVerified: true });
+  const firebaseUid = firebaseUser.uid;
+
   const created = await internalRequest("POST", "/internal/clinic", {
     firebaseUid,
-    email: "eval@schedurx.test",
+    email: evalEmail,
     phone: "+919999999900",
     fullName: "Dr. Eval Owner",
     clinicName: TEST_CLINIC_NAME,
@@ -146,15 +168,22 @@ async function setupClinic() {
   });
   await calendarSvc.getOrCreateDoctorCalendar(nettuClient, supabaseClient, doctorTwo.id, clinic.id, console);
 
-  return { clinicId: clinic.id, doctorOneId: doctorOne.id, doctorTwoId: doctorTwo.id, supabaseClient, firebaseUid };
+  return { clinicId: clinic.id, doctorOneId: doctorOne.id, doctorTwoId: doctorTwo.id, supabaseClient, firebaseUid, firebaseAdminAuth };
 }
 
 async function setPlan(supabaseClient, clinicId, plan) {
   await supabaseClient.from("Clinic").update({ plan }).eq("id", clinicId);
 }
 
-async function teardownClinic(clinicId) {
+async function teardownClinic(clinicId, firebaseAdminAuth, firebaseUid) {
   await internalRequest("DELETE", `/internal/clinic/${clinicId}`);
+  if (firebaseAdminAuth && firebaseUid) {
+    try {
+      await firebaseAdminAuth.deleteUser(firebaseUid);
+    } catch (err) {
+      console.error("[eval] failed to delete throwaway Firebase user (non-fatal):", err.message);
+    }
+  }
 }
 
 // Real booking via the real unauthenticated public route — exactly how an
@@ -360,7 +389,7 @@ async function main() {
     results = await runScenarios(ctx);
   } finally {
     console.log("[eval] tearing down clinic...");
-    await teardownClinic(ctx.clinicId);
+    await teardownClinic(ctx.clinicId, ctx.firebaseAdminAuth, ctx.firebaseUid);
   }
 
   const passed = results.filter((r) => r.pass).length;
