@@ -1,0 +1,13 @@
+[Unit]
+Description=ScheduRx Stripe webhook health check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=schedurx
+WorkingDirectory=/home/schedurx/schedurx-backend
+EnvironmentFile=/home/schedurx/schedurx-backend/.env
+ExecStart=/usr/bin/node scripts/check-stripe-webhook-health.js
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stripe-webhook-health

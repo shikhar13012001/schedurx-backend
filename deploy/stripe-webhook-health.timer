@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Stripe webhook health check every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=stripe-webhook-health.service
+
+[Install]
+WantedBy=timers.target
