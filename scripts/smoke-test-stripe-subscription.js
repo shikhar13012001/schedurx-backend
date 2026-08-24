@@ -214,8 +214,8 @@ async function main() {
     // PaymentMethod token (valid only with test-mode keys, no real card
     // data), attached + set default, then a real Subscription created
     // directly (mirrors what a completed Checkout would have produced).
-    await stripe.paymentMethods.attach("pm_card_visa", { customer: stripeCustomerId });
-    await stripe.customers.update(stripeCustomerId, { invoice_settings: { default_payment_method: "pm_card_visa" } });
+    const paymentMethod = await stripe.paymentMethods.attach("pm_card_visa", { customer: stripeCustomerId });
+    await stripe.customers.update(stripeCustomerId, { invoice_settings: { default_payment_method: paymentMethod.id } });
     const subscription = await stripe.subscriptions.create({
       customer: stripeCustomerId,
       items: [{ price: process.env.STRIPE_PRICE_BASIC }],
