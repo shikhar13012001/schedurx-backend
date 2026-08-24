@@ -412,6 +412,38 @@ async function createPendingTokenBooking(nettuClient, supabaseClient, opts, log,
   return { pendingBookingId: data.id, amountPaise, expiresAt: data.expiresAt, appointmentId };
 }
 
+// Public-safe summary for schedurx-form-agent's payment page (see
+// api-v1-public.js) — same "id + clinicId together" capability model as
+// every other public route, no separate patient login. Returns null (not a
+// throw) for an unknown/wrong-clinic id so the route can 404 cleanly.
+async function getPendingBookingById(supabaseClient, clinicId, pendingBookingId) {
+  const { data: pending, error } = await supabaseClient
+    .from("PendingBooking")
+    .select("*")
+    .eq("id", pendingBookingId)
+    .eq("clinicId", clinicId)
+    .maybeSingle();
+  if (error) throw Object.assign(new Error(`DB error: ${error.message}`), { code: "DATABASE_ERROR", statusCode: 500 });
+  if (!pending) return null;
+
+  const [clinic, doctor] = await Promise.all([
+    clinicSvc.getClinic(supabaseClient, clinicId),
+    pending.doctorId ? doctorSvc.getDoctor(supabaseClient, pending.doctorId) : null,
+  ]);
+
+  return {
+    id: pending.id,
+    status: pending.status,
+    timeslot: pending.timeslot,
+    durationMinutes: pending.durationMinutes,
+    amountPaise: pending.amountPaise,
+    expiresAt: pending.expiresAt,
+    patientName: pending.bookingParams?.patient?.fullName ?? pending.bookingParams?.patient?.name ?? null,
+    clinic: clinic ? { id: clinic.id, name: clinic.name } : null,
+    doctor: doctor ? { id: doctor.id, fullName: doctor.fullName } : null,
+  };
+}
+
 // Called from stripe-webhook.js once Stripe confirms a token payment
 // (checkout.session.completed with metadata.pendingBookingId). Idempotent —
 // a Stripe retry, or a webhook firing twice, just no-ops the second time
@@ -972,6 +1004,7 @@ module.exports = {
   validateAndReserveSlot,
   persistAppointment,
   createPendingTokenBooking,
+  getPendingBookingById,
   finalizePendingBooking,
   expirePendingBookings,
 };

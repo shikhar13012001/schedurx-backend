@@ -106,40 +106,66 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
         );
 
         const clinic = await clinicSvc.getClinic(supabaseClient, req.staff.clinicId);
-        const fallbackBase = config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${req.staff.clinicId}/${pending.appointmentId}` : null;
-        const session = await stripeSvc.createTokenCheckoutSession(stripeClient, {
-          pendingBookingId: pending.pendingBookingId,
-          amountPaise: pending.amountPaise,
-          clinicId: req.staff.clinicId,
-          clinicName: clinic?.name,
-          successUrl: fallbackBase ? `${fallbackBase}?paid=1` : "https://schedurx.com/booked",
-          cancelUrl: fallbackBase ? `${fallbackBase}?paid=0` : "https://schedurx.com/booked",
-        });
+        // Prefer schedurx-form-agent's own payment page (not straight to
+        // Stripe) — that page creates a fresh Checkout Session on demand
+        // (see api-v1-public.js's POST /pending-bookings/:id/checkout-session),
+        // so the link stays valid even if the patient opens it well after
+        // this message was sent, and shows real booking details before
+        // handing off to Stripe. Falls back to a Stripe session created
+        // right now if PATIENT_APP_BASE_URL isn't configured — same
+        // graceful-degrade posture as bookingUrlFor, but this feature still
+        // needs to work end-to-end even then, unlike a booking confirmation
+        // that can just omit a nice-to-have link.
+        const payUrl = config.PATIENT_APP_BASE_URL
+          ? `${config.PATIENT_APP_BASE_URL}/${req.staff.clinicId}/pay/${pending.pendingBookingId}`
+          : (
+              await stripeSvc.createTokenCheckoutSession(stripeClient, {
+                pendingBookingId: pending.pendingBookingId,
+                amountPaise: pending.amountPaise,
+                clinicId: req.staff.clinicId,
+                clinicName: clinic?.name,
+                successUrl: "https://schedurx.com/booked",
+                cancelUrl: "https://schedurx.com/booked",
+              })
+            ).url;
+        const messageBody = `Hi ${patientRow.fullName || "there"}, please complete your ₹${Math.round(pending.amountPaise / 100)} booking payment to confirm your appointment at ${clinic?.name ?? "the clinic"}: ${payUrl}`;
+
+        // SMS has no session-window restriction (unlike free-form WhatsApp,
+        // which Meta blocks outside an open 24h conversation — true for
+        // almost every brand-new booking) — send it unconditionally so the
+        // patient reliably gets the link even when WhatsApp can't deliver.
+        let smsSent = false;
+        if (twilioClient && patientRow.contactNumber) {
+          try {
+            await twilioClient.sendSms({ to: patientRow.contactNumber, body: messageBody });
+            smsSent = true;
+          } catch (err) {
+            req.log?.warn({ err, pendingBookingId: pending.pendingBookingId }, "[api-v1:appointments] token payment SMS failed to send");
+          }
+        }
 
         let tokenLinkSent = false;
         if (twilioClient && patientRow.contactNumber) {
           try {
-            await twilioClient.sendWhatsApp({
-              to: patientRow.contactNumber,
-              body: `Hi ${patientRow.fullName || "there"}, please complete your ₹${Math.round(pending.amountPaise / 100)} booking payment to confirm your appointment at ${clinic?.name ?? "the clinic"}: ${session.url}`,
-            });
+            await twilioClient.sendWhatsApp({ to: patientRow.contactNumber, body: messageBody });
             tokenLinkSent = true;
           } catch (err) {
             // Free-text WhatsApp only delivers inside an open 24h session
             // window (see comms-workflow-service.js) — no approved Content
             // Template exists yet for an ad-hoc payment link, so this can
-            // legitimately fail. checkoutUrl is still returned below so
-            // staff can share it manually (copy/SMS/call).
+            // legitimately fail (routinely, not rarely). The SMS above and
+            // checkoutUrl below both still get the patient/staff a working
+            // link regardless.
             req.log?.warn({ err, pendingBookingId: pending.pendingBookingId }, "[api-v1:appointments] token payment WhatsApp link failed to send");
           }
         }
 
         return ok(res, {
           pendingBookingId: pending.pendingBookingId,
-          checkoutUrl: session.url,
-          sessionId: session.id,
+          checkoutUrl: payUrl,
           amountPaise: pending.amountPaise,
           tokenLinkSent,
+          smsSent,
           patient: patientRow,
         });
       }

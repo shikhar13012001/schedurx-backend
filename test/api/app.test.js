@@ -582,6 +582,7 @@ test("POST /api/v1/appointments with tokenRequested holds the slot, sends the pa
     assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/token_1");
     assert.equal(body.data.amountPaise, 20000);
     assert.equal(body.data.tokenLinkSent, true);
+    assert.equal(body.data.smsSent, true);
     assert.ok(body.data.pendingBookingId.startsWith("pbk_"));
   });
 
@@ -589,6 +590,11 @@ test("POST /api/v1/appointments with tokenRequested holds the slot, sends the pa
   assert.equal(supabaseClient._tables.PendingBooking.length, 1);
   assert.equal(twilioClient.calls.sendWhatsApp.length, 1);
   assert.match(twilioClient.calls.sendWhatsApp[0].body, /checkout\.stripe\.com\/token_1/);
+  // SMS has no 24h-session-window restriction (unlike WhatsApp) — sent
+  // unconditionally alongside WhatsApp so the patient reliably gets the
+  // payment link even when WhatsApp can't deliver it.
+  assert.equal(twilioClient.calls.sendSms.length, 1);
+  assert.match(twilioClient.calls.sendSms[0].body, /checkout\.stripe\.com\/token_1/);
 });
 
 test("POST /api/v1/appointments with tokenRequested still returns the checkout URL when the WhatsApp send fails", async () => {
@@ -625,6 +631,105 @@ test("POST /api/v1/appointments with tokenRequested still returns the checkout U
     assert.equal(response.status, 200);
     assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/token_1");
     assert.equal(body.data.tokenLinkSent, false);
+    // SMS is independent of the WhatsApp send — it still goes out (and the
+    // checkoutUrl is still returned) even when WhatsApp fails.
+    assert.equal(body.data.smsSent, true);
+  });
+});
+
+test("GET /api/v1/public/pending-bookings/:id returns a public-safe summary", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [tokenClinicRow()],
+    Doctor: [tokenDoctorRow()],
+    PendingBooking: [
+      {
+        id: "pbk_1",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        appointmentId: "apt_1",
+        timeslot: TOKEN_FUTURE_START,
+        durationMinutes: 30,
+        amountPaise: 20000,
+        bookingParams: { patient: { fullName: "Test Patient" } },
+        status: "pending",
+        expiresAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+      },
+    ],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const missingClinic = await request("/api/v1/public/pending-bookings/pbk_1");
+    assert.equal(missingClinic.status, 422);
+
+    const notFound = await request("/api/v1/public/pending-bookings/pbk_nope?clinicId=clinic-1");
+    assert.equal(notFound.status, 404);
+
+    const response = await request("/api/v1/public/pending-bookings/pbk_1?clinicId=clinic-1");
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.pendingBooking.id, "pbk_1");
+    assert.equal(body.data.pendingBooking.status, "pending");
+    assert.equal(body.data.pendingBooking.amountPaise, 20000);
+    assert.equal(body.data.pendingBooking.doctor.fullName, "Dr. Priya");
+    assert.equal(body.data.pendingBooking.patientName, "Test Patient");
+  });
+});
+
+test("POST /api/v1/public/pending-bookings/:id/checkout-session creates a fresh session", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [tokenClinicRow()],
+    Doctor: [tokenDoctorRow()],
+    PendingBooking: [
+      {
+        id: "pbk_1",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        appointmentId: "apt_1",
+        timeslot: TOKEN_FUTURE_START,
+        durationMinutes: 30,
+        amountPaise: 20000,
+        bookingParams: { patient: { fullName: "Test Patient" } },
+        status: "pending",
+        expiresAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+      },
+    ],
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: createStripeStub({ session: { id: "cs_fresh_1", url: "https://checkout.stripe.com/fresh_1" } }),
+    openaiClient: null,
+  });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/public/pending-bookings/pbk_1/checkout-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clinicId: "clinic-1", successUrl: "https://example.com/ok", cancelUrl: "https://example.com/cancel" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/fresh_1");
+  });
+
+  // Already-paid/expired bookings can't be paid again.
+  supabaseClient._tables.PendingBooking[0].status = "completed";
+  const app2 = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: createStripeStub({ session: { id: "cs_fresh_2", url: "https://checkout.stripe.com/fresh_2" } }),
+    openaiClient: null,
+  });
+  await withServer(app2, async ({ request }) => {
+    const response = await request("/api/v1/public/pending-bookings/pbk_1/checkout-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clinicId: "clinic-1", successUrl: "https://example.com/ok", cancelUrl: "https://example.com/cancel" }),
+    });
+    assert.equal(response.status, 409);
   });
 });
 

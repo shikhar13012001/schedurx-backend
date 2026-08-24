@@ -321,6 +321,60 @@ function createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient, stri
     }
   });
 
+  // GET /api/v1/public/pending-bookings/:id?clinicId= — the pay-first token
+  // flow's own page (schedurx-form-agent), separate from the "manage an
+  // existing booking" route above since a pending booking has no Appointment
+  // row yet. Deliberately doesn't create a Stripe Checkout Session itself —
+  // see the POST below — so a page view/refresh/crawler hit never spawns one.
+  router.get("/pending-bookings/:id", async (req, res) => {
+    const { clinicId } = req.query;
+    if (!clinicId) return fail(res, 422, "MISSING_FIELDS", "clinicId is required");
+
+    try {
+      const pending = await appointmentSvc.getPendingBookingById(supabaseClient, clinicId, req.params.id);
+      if (!pending) return fail(res, 404, "PENDING_BOOKING_NOT_FOUND", "Pending booking not found");
+      return ok(res, { pendingBooking: pending });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:public] get pending booking failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
+  // POST /api/v1/public/pending-bookings/:id/checkout-session — creates a
+  // fresh Stripe Checkout Session on demand (the one created at booking time
+  // was only ever handed to the WhatsApp/SMS send, never persisted — see
+  // appointment-service.js's createPendingTokenBooking) so "Pay now" always
+  // gets a live, unexpired session regardless of how long ago the booking
+  // was made or how many times this page was reopened.
+  router.post("/pending-bookings/:id/checkout-session", async (req, res) => {
+    if (!stripeClient) return fail(res, 503, "STRIPE_NOT_CONFIGURED", "STRIPE_SECRET_KEY is not set");
+    const { clinicId, successUrl, cancelUrl } = req.body ?? {};
+    if (!clinicId || !successUrl || !cancelUrl) {
+      return fail(res, 422, "MISSING_FIELDS", "clinicId, successUrl, and cancelUrl are required");
+    }
+
+    try {
+      const pending = await appointmentSvc.getPendingBookingById(supabaseClient, clinicId, req.params.id);
+      if (!pending) return fail(res, 404, "PENDING_BOOKING_NOT_FOUND", "Pending booking not found");
+      if (pending.status !== "pending") {
+        return fail(res, 409, "PENDING_BOOKING_NOT_PAYABLE", `This booking is ${pending.status}, not awaiting payment`);
+      }
+
+      const session = await stripeSvc.createTokenCheckoutSession(stripeClient, {
+        pendingBookingId: pending.id,
+        amountPaise: pending.amountPaise,
+        clinicId,
+        clinicName: pending.clinic?.name,
+        successUrl,
+        cancelUrl,
+      });
+      return ok(res, { checkoutUrl: session.url, sessionId: session.id });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:public] pending-booking checkout session failed");
+      return fail(res, err.statusCode ?? 502, err.code ?? "STRIPE_ERROR", err.message);
+    }
+  });
+
   return router;
 }
 
