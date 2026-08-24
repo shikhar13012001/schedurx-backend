@@ -12,17 +12,23 @@ const { validatePlanSelection, estimateMonthlyPaise, PRICE_CONFIG_VERSION } = re
 // that a clinic should opt in before anything gets sent. In practice that
 // meant every newly onboarded clinic sent nothing at all — no booking
 // confirmation, no reminder — until someone manually found Automations and
-// configured it, which nobody does on day one. These 5 defaults are the
-// same ones already live and Meta-approved on poc-clinic-001 (see
-// PRODUCTION_CHECKLIST.md's message-template work): SMS + an approved
-// WhatsApp Content Template for booking/reschedule/cancellation (dual-send,
-// since the WhatsApp template has no session-window restriction but a
-// brand-new patient contact often does), a 1h-before WhatsApp reminder, and a
-// dual-channel missed-call follow-up. Editable/removable from Automations
-// like anything else — this only changes what a clinic starts with.
+// configured it, which nobody does on day one. These defaults are the
+// "_v1" WhatsApp Content Templates (richer than the original plain-text
+// approvals: call-to-action buttons on booking/reschedule/missed-call,
+// quick-reply buttons on the reminder) plus an SMS fallback for the three
+// trigger-and-fire-immediately events, since the WhatsApp template has no
+// session-window restriction but a brand-new patient contact often does.
+// contentVariables is positional — index+1 maps to the template's
+// {{1}}, {{2}}, ... — verified against each template's real body/actions
+// via Twilio's Content API (GET /v1/Content/:sid), not guessed. A couple of
+// templates (booking_confirmed_v1, appt_rescheduled_v1) number their
+// call-to-action URL variable past a gap (e.g. body uses {{1-3}}, the button
+// uses {{6}}) — the "__unused" entries below fill 4/5 so the array's index
+// arithmetic still lands the URL value on the right key; the template never
+// references {{4}}/{{5}} so an empty string there is harmless.
 //
-// reminder-24h-wa's id is kept as-is even though it now fires 1h before —
-// renaming it would silently orphan any reminder already queued in
+// reminder-1h-wa's id is kept as reminder-24h-wa even though it now fires 1h
+// before — renaming it would silently orphan any reminder already queued in
 // nettu-scheduler for an appointment booked while the old 24h timing was
 // live (buildDelayedReminderEntries bakes `${appointmentId}::${w.id}` into
 // nettu at booking time; webhooks-nettu.js looks the id back up in the
@@ -34,7 +40,8 @@ const DEFAULT_COMMUNICATION_WORKFLOWS = [
   },
   {
     id: "booking-conf-wa-approved", channel: "whatsapp", enabled: true, trigger: "booking_confirmed", offsetMinutes: 0,
-    template: "", contentSid: "HX1841dbafde6ac7260142047396f91479", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+    template: "", contentSid: "HX55d0121e571e9f5f46c83c761e09f8b8",
+    contentVariables: ["patientName", "doctorAndClinic", "apptTime", "__unused4", "__unused5", "bookingUrlPath"],
   },
   {
     id: "reschedule-sms", channel: "sms", enabled: true, trigger: "reschedule", offsetMinutes: 0,
@@ -42,7 +49,8 @@ const DEFAULT_COMMUNICATION_WORKFLOWS = [
   },
   {
     id: "reschedule-wa-approved", channel: "whatsapp", enabled: true, trigger: "reschedule", offsetMinutes: 0,
-    template: "", contentSid: "HXb43e57b9457e67c349faebc6aeddf97d", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+    template: "", contentSid: "HX8c793af3afaafe39b5eed526543d75cd",
+    contentVariables: ["patientName", "doctorAndClinic", "oldApptTime", "apptTime", "bookingUrlPath"],
   },
   {
     id: "cancel-sms", channel: "sms", enabled: true, trigger: "cancellation", offsetMinutes: 0,
@@ -50,15 +58,28 @@ const DEFAULT_COMMUNICATION_WORKFLOWS = [
   },
   {
     id: "cancel-wa-approved", channel: "whatsapp", enabled: true, trigger: "cancellation", offsetMinutes: 0,
-    template: "", contentSid: "HX46afd43a893b38d7955f7c56d4eef7da", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+    template: "", contentSid: "HX5e2b312863a160a8c39195ae2b1513b6", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
   },
   {
     id: "reminder-24h-wa", channel: "whatsapp", enabled: true, trigger: "reminder", offsetMinutes: -60,
-    template: "", contentSid: "HXf5ad76046a6a799a43cdaf36b657f015", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+    template: "", contentSid: "HX2ef914e3ab23cde86c7ad1e870dca71a", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+  },
+  {
+    id: "pre-visit-wa", channel: "whatsapp", enabled: true, trigger: "pre_appointment", offsetMinutes: -1440,
+    template: "", contentSid: "HX1e88fbdafc00df38d61bbfe05b9fd48c", contentVariables: ["patientName", "doctorAndClinic", "apptTime"],
+  },
+  {
+    id: "post-visit-wa", channel: "whatsapp", enabled: true, trigger: "post_appointment", offsetMinutes: 60,
+    template: "", contentSid: "HX624789d6a245a76ff112a71430a9e729", contentVariables: ["patientName", "clinicName", "clinicPhone"],
+  },
+  {
+    id: "review-request-wa", channel: "whatsapp", enabled: true, trigger: "review_request", offsetMinutes: 180,
+    template: "", contentSid: "HX42c511a86955b5531f277a4d244185b6", contentVariables: ["patientName", "clinicName"],
   },
   {
     id: "missed-call-wa", channel: "whatsapp", enabled: true, trigger: "missed_call_followup", offsetMinutes: 0,
     template: "Sorry we missed your call at {{clinicName}}! Book an appointment here: {{bookingUrl}}, or call us back at {{clinicPhone}}.",
+    contentSid: "HXf5ef9c0012d304928116c210bc23a2d7", contentVariables: ["clinicName", "clinicPhone", "bookingUrlPath"],
   },
   {
     id: "missed-call-sms", channel: "sms", enabled: true, trigger: "missed_call_followup", offsetMinutes: 0,
