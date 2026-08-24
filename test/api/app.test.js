@@ -2259,6 +2259,42 @@ test("POST /webhooks/twilio/voice-status skips the follow-up when no workflow is
   });
 });
 
+test("POST /webhooks/twilio/message-status updates the matching MessageLog row with the real delivery outcome", async () => {
+  const supabaseClient = createTableStub({
+    MessageLog: [{ id: "msglog_1", providerSid: "SM123", status: "sent", channel: "whatsapp", purpose: "booking_confirmed" }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/message-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ MessageSid: "SM123", MessageStatus: "undelivered", ErrorCode: "63016" }),
+    });
+    assert.equal(response.status, 200);
+  });
+
+  const row = supabaseClient._tables.MessageLog.find((r) => r.providerSid === "SM123");
+  assert.equal(row.status, "undelivered");
+  assert.equal(row.errorCode, "63016");
+});
+
+test("POST /webhooks/twilio/message-status still returns 200 for a sid it never logged", async () => {
+  const supabaseClient = createTableStub({ MessageLog: [] });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/message-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ MessageSid: "SM-unknown", MessageStatus: "delivered" }),
+    });
+    assert.equal(response.status, 200);
+  });
+});
+
 test("POST /webhooks/twilio/whatsapp-inbound routes a patient message into the Thread/ChatMsg inbox", async () => {
   const supabaseClient = createTableStub({
     Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],

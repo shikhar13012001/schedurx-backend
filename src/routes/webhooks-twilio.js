@@ -8,10 +8,12 @@
 // POST /voice        — inbound forwarded call, returns TwiML.
 // POST /voice-status — call status callback (used to fire the missed-call
 //                      follow-up once the call actually ends).
-// POST /message-status — SMS/WhatsApp delivery callbacks (slice 2: wires
-//                        into Reminder.status once comms-workflow-service
-//                        lands; accepted and logged today so Twilio doesn't
-//                        see 404s if the number's already configured for it).
+// POST /message-status — SMS/WhatsApp delivery callbacks. Every send that
+//                        goes through twilio-client.js now attaches this as
+//                        its statusCallback (when PUBLIC_API_BASE_URL is
+//                        configured) and gets a MessageLog row; this route
+//                        updates that row with the real outcome as Twilio
+//                        reports it (queued -> sent -> delivered/failed).
 // POST /whatsapp-inbound — a patient texting the clinic's WhatsApp number.
 //                        Always routes into the existing staff Thread/ChatMsg
 //                        consult inbox (same model sendReply() already uses)
@@ -29,6 +31,7 @@ const clinicSvc = require("../services/clinic-service");
 const phoneRouteSvc = require("../services/phone-route-service");
 const callLogSvc = require("../services/call-log-service");
 const messagingSvc = require("../services/messaging-service");
+const messageLogSvc = require("../services/message-log-service");
 const tableSvc = require("../services/table-service");
 const whatsappAgentSvc = require("../services/whatsapp-agent-service");
 const openaiSvc = require("../services/openai-service");
@@ -392,10 +395,23 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
   });
 
   router.post("/message-status", verify, async (req, res) => {
-    req.log?.info(
-      { sid: req.body?.MessageSid, status: req.body?.MessageStatus },
-      "[webhooks:twilio] message-status received",
-    );
+    const sid = req.body?.MessageSid;
+    const status = req.body?.MessageStatus;
+    req.log?.info({ sid, status, errorCode: req.body?.ErrorCode }, "[webhooks:twilio] message-status received");
+    if (sid && status) {
+      try {
+        await messageLogSvc.updateStatus(supabaseClient, {
+          sid,
+          status,
+          errorCode: req.body?.ErrorCode,
+          errorMessage: req.body?.ErrorMessage,
+        });
+      } catch (err) {
+        // Still 200 — a logging failure isn't Twilio's problem, and retrying
+        // this callback won't fix a DB error.
+        req.log?.error({ err, sid }, "[webhooks:twilio] failed to record message status");
+      }
+    }
     res.sendStatus(200);
   });
 
@@ -568,6 +584,8 @@ async function triggerMissedCallFollowup(supabaseClient, twilioClient, clinicId,
         contentSid: workflow.contentSid,
         contentVariables: workflow.contentVariables,
         data: { clinicName: clinic?.name, clinicPhone: clinic?.phone, bookingUrl, bookingUrlPath },
+        clinicId,
+        purpose: "missed_call_followup",
       },
       log,
     );

@@ -137,7 +137,7 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
         let smsSent = false;
         if (twilioClient && patientRow.contactNumber) {
           try {
-            await twilioClient.sendSms({ to: patientRow.contactNumber, body: messageBody });
+            await twilioClient.sendSms({ to: patientRow.contactNumber, body: messageBody, clinicId: req.staff.clinicId, purpose: "token_payment" });
             smsSent = true;
           } catch (err) {
             req.log?.warn({ err, pendingBookingId: pending.pendingBookingId }, "[api-v1:appointments] token payment SMS failed to send");
@@ -147,7 +147,7 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
         let tokenLinkSent = false;
         if (twilioClient && patientRow.contactNumber) {
           try {
-            await twilioClient.sendWhatsApp({ to: patientRow.contactNumber, body: messageBody });
+            await twilioClient.sendWhatsApp({ to: patientRow.contactNumber, body: messageBody, clinicId: req.staff.clinicId, purpose: "token_payment" });
             tokenLinkSent = true;
           } catch (err) {
             // Free-text WhatsApp only delivers inside an open 24h session

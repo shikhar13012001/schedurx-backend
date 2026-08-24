@@ -75,13 +75,18 @@ function createApiV1TeamRouter(supabaseClient, twilioClient) {
               from: clinic?.whatsappFrom,
               contentSid: config.TWILIO_TEAM_INVITE_CONTENT_SID,
               contentVariables: { 1: clinic?.name ?? "the clinic", 2: role, 3: link },
+              clinicId: req.staff.clinicId,
+              purpose: "team_invite",
             }
-          : { to: normalizedPhone, from: clinic?.whatsappFrom, body };
+          : { to: normalizedPhone, from: clinic?.whatsappFrom, body, clinicId: req.staff.clinicId, purpose: "team_invite" };
 
         delivery = await Promise.all([
           sendInviteChannel({ channel: "whatsapp", send: () => twilioClient.sendWhatsApp(whatsappOptions) }, req.log),
           sendInviteChannel(
-            { channel: "sms", send: () => twilioClient.sendSms({ to: normalizedPhone, body }) },
+            {
+              channel: "sms",
+              send: () => twilioClient.sendSms({ to: normalizedPhone, body, clinicId: req.staff.clinicId, purpose: "team_invite" }),
+            },
             req.log,
           ),
         ]);

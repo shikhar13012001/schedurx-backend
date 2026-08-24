@@ -129,7 +129,7 @@ async function sendReply(supabaseClient, { clinicId, threadId, staffId, body, st
 //     into plain body text — only valid within an open WhatsApp session, or
 //     for SMS (which has no session-window restriction).
 async function sendTemplatedMessage(
-  { twilioClient, channel, toPhone, from, template, contentSid, contentVariables, data },
+  { twilioClient, channel, toPhone, from, template, contentSid, contentVariables, data, clinicId, purpose },
   log,
 ) {
   if (!["sms", "whatsapp"].includes(channel)) {
@@ -142,7 +142,7 @@ async function sendTemplatedMessage(
       variables[String(idx + 1)] = data?.[key] != null ? String(data[key]) : "";
     });
     const sendFn = channel === "sms" ? twilioClient.sendSms : twilioClient.sendWhatsApp;
-    const result = await sendFn({ to: toPhone, from, contentSid, contentVariables: variables });
+    const result = await sendFn({ to: toPhone, from, contentSid, contentVariables: variables, clinicId, purpose });
     log?.info({ toPhone, sid: result?.sid, contentSid }, `[messagingSvc] ${channel} template sent`);
     return { sent: true, providerMessageId: result?.sid ?? null };
   }
@@ -152,7 +152,7 @@ async function sendTemplatedMessage(
     throw Object.assign(new Error("Rendered message body is empty"), { code: "EMPTY_TEMPLATE", statusCode: 422 });
   }
   const sendFn = channel === "sms" ? twilioClient.sendSms : twilioClient.sendWhatsApp;
-  const result = await sendFn({ to: toPhone, from, body });
+  const result = await sendFn({ to: toPhone, from, body, clinicId, purpose });
   log?.info({ toPhone, sid: result?.sid }, `[messagingSvc] ${channel} sent`);
   return { sent: true, providerMessageId: result?.sid ?? null };
 }

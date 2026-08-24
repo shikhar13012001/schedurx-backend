@@ -94,7 +94,7 @@ async function recordReminder(supabaseClient, { appointmentId, type, channel, st
   }
 }
 
-async function sendAndTrack({ supabaseClient, twilioClient, workflow, appointmentId, toPhone, data }, log) {
+async function sendAndTrack({ supabaseClient, twilioClient, workflow, appointmentId, toPhone, data, clinicId }, log) {
   const from = workflow.channel === "whatsapp" ? data?.clinicWhatsappFrom : undefined;
   // Combined convenience variable for Content Templates — Meta's per-template
   // variable-density review (see webhooks-twilio.js's neighboring docs) means
@@ -118,6 +118,8 @@ async function sendAndTrack({ supabaseClient, twilioClient, workflow, appointmen
         contentSid: workflow.contentSid,
         contentVariables: workflow.contentVariables,
         data: fullData,
+        clinicId,
+        purpose: workflow.trigger,
       },
       log,
     );
@@ -163,7 +165,7 @@ async function sendImmediateWorkflowMessages(
     textCommsUrl: buildTextCommsUrl(clinic, appointmentId),
   };
   for (const workflow of workflows) {
-    await sendAndTrack({ supabaseClient, twilioClient, workflow, appointmentId, toPhone, data: fullData }, log);
+    await sendAndTrack({ supabaseClient, twilioClient, workflow, appointmentId, toPhone, data: fullData, clinicId: clinic?.id }, log);
   }
 }
 
@@ -224,7 +226,7 @@ async function sendDelayedWorkflowMessage({ supabaseClient, twilioClient, clinic
     textCommsUrl: buildTextCommsUrl(clinic, appointmentId),
   };
   await sendAndTrack(
-    { supabaseClient, twilioClient, workflow, appointmentId, toPhone: patient.contactNumber, data },
+    { supabaseClient, twilioClient, workflow, appointmentId, toPhone: patient.contactNumber, data, clinicId: clinic?.id },
     log,
   );
 }

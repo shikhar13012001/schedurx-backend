@@ -115,18 +115,21 @@ function buildElevenLabsClient() {
   }
 }
 
-function buildTwilioClient() {
+function buildTwilioClient(supabaseClient) {
   if (!config.TWILIO_ACCOUNT_SID || !config.TWILIO_AUTH_TOKEN) {
     logger.warn("[startup] Twilio not configured — /webhooks/twilio/* disabled");
     return null;
   }
   try {
     const { createTwilioClient } = require("./services/twilio-client");
+    const messageLogSvc = require("./services/message-log-service");
     return createTwilioClient({
       accountSid: config.TWILIO_ACCOUNT_SID,
       authToken: config.TWILIO_AUTH_TOKEN,
       smsFrom: config.TWILIO_SMS_FROM,
       whatsappFrom: config.TWILIO_WHATSAPP_FROM,
+      statusCallbackBaseUrl: config.PUBLIC_API_BASE_URL,
+      onMessageSent: (info) => messageLogSvc.recordSent(supabaseClient, info),
     });
   } catch (err) {
     logger.error({ err }, "[startup] Twilio client construction failed — /webhooks/twilio/* disabled");
@@ -173,7 +176,7 @@ async function start() {
   const stripeClient = buildStripeClient();
   const openaiClient = buildOpenaiClient();
   const assistantModel = buildAssistantModel();
-  const twilioClient = buildTwilioClient();
+  const twilioClient = buildTwilioClient(supabaseClient);
   const elevenLabsClient = buildElevenLabsClient();
 
   const app = createApp({

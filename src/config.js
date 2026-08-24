@@ -143,6 +143,13 @@ const schema = z.object({
   // an invite link needs exactly one canonical URL to send.
   DASHBOARD_BASE_URL: z.string().optional(),
 
+  // This backend's own public origin, e.g. "https://api.schedurx.com" — used
+  // to build the statusCallback URL attached to every outbound Twilio send
+  // (twilio-client.js), so Twilio has somewhere to report real delivery
+  // outcomes (see supabase/migrations/20260825_message_log.sql). Left
+  // unset, sends still work exactly as before — they just aren't tracked.
+  PUBLIC_API_BASE_URL: z.string().optional(),
+
   // ── Public patient-facing API CORS (/api/v1/public/*) — separate allowlist
   // from CORS_ALLOWED_ORIGIN since that one gates the staff dashboard only.
   // Comma-separated, same format. PATIENT_APP_BASE_URL (the patient app's
