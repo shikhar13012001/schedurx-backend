@@ -138,7 +138,25 @@ async function respondToPatientMessage({ supabaseClient, nettuClient, twilioClie
       stopWhen: stepCountIs(8),
     });
 
-    return result.text?.trim() || null;
+    const text = result.text?.trim();
+    if (text) return text;
+
+    // Phase 8's live eval surfaced this: despite the system prompt's
+    // explicit "ALWAYS end your turn with a short text reply" instruction,
+    // the model sometimes ends its turn right after a tool call with no
+    // closing text at all — no error, no thrown exception, the tool call
+    // itself (e.g. escalate_to_staff) genuinely succeeded, just nothing to
+    // say about it. Previously this fell through to `|| null`, which
+    // webhooks-twilio.js turns into a truly empty TwiML reply — the patient
+    // sees literally nothing, indistinguishable from the bot being broken.
+    // A generic acknowledgment is always better than silence here; logged
+    // (unlike the old silent null) so this is visible for future prompt
+    // tuning rather than invisible.
+    log?.warn(
+      { clinicId: clinic?.id, threadId: thread?.id, finishReason: result.finishReason },
+      "[whatsappAgentSvc] model ended its turn with no closing text — using a generic fallback instead of a silent reply",
+    );
+    return "Got it — thanks for your message! If you don't hear back shortly, a staff member will follow up.";
   } catch (err) {
     log?.error({ err, clinicId: clinic?.id, threadId: thread?.id }, "[whatsappAgentSvc] failed to generate a reply");
     return null;

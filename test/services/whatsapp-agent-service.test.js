@@ -61,12 +61,26 @@ describe("respondToPatientMessage", () => {
     assert.equal(reply, null);
   });
 
-  test("returns null instead of empty string when the model produces no text", async () => {
-    const supabaseClient = makeSupabase();
+  // Phase 8's live eval surfaced this: the model sometimes ends its turn
+  // with no closing text (e.g. right after a tool call) despite the system
+  // prompt saying to always add one — a generic fallback beats a truly
+  // silent (empty TwiML) reply, which is indistinguishable from the bot
+  // being broken to the patient on the other end.
+  test("returns a generic fallback (never null/empty) when the model produces no text", async () => {
+    // At least one message must exist — real usage always has one (the
+    // inbound message that triggered this call is recorded before
+    // respondToPatientMessage is ever called), and generateText itself
+    // throws AI_InvalidPromptError on a genuinely empty messages array,
+    // which would mask this test behind the unrelated catch-all instead of
+    // actually exercising the "model produced no text" path.
+    const supabaseClient = makeSupabase([
+      { id: "m1", threadId: THREAD.id, direction: "inbound", body: "hi", createdAt: "2026-01-01" },
+    ]);
     const reply = await respondToPatientMessage(
       { supabaseClient, nettuClient: {}, twilioClient: {}, assistantModel: textOnlyModel("   "), clinic: CLINIC, patient: PATIENT, thread: THREAD },
       null,
     );
-    assert.equal(reply, null);
+    assert.ok(reply, "must never be null/empty — a silent reply looks identical to the bot being broken");
+    assert.notEqual(reply.trim(), "");
   });
 });
