@@ -17,6 +17,7 @@ process.env.NETTU_API_KEY = "nettu-api-key";
 process.env.STRIPE_PRICE_BASIC = "price_basic_test";
 process.env.STRIPE_PRICE_PREMIUM = "price_premium_test";
 process.env.STRIPE_PRICE_ADDON_AI_WHATSAPP_AGENT = "price_addon_wa_test";
+process.env.PATIENT_APP_BASE_URL = "https://book.schedurx.example";
 
 const { createApp } = require("../../src/app");
 const { createTableStub } = require("../helpers/supabase-table-stub");
@@ -579,7 +580,10 @@ test("POST /api/v1/appointments with tokenRequested holds the slot, sends the pa
     });
     const body = await readJson(response);
     assert.equal(response.status, 200);
-    assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/token_1");
+    // Points at schedurx-form-agent's own payment page (fresh Checkout
+    // Session created on demand there), not straight to a Stripe URL created
+    // at booking time — see api-v1-appointments.js's payUrl comment.
+    assert.match(body.data.checkoutUrl, /^https:\/\/book\.schedurx\.example\/clinic-1\/pay\/pbk_/);
     assert.equal(body.data.amountPaise, 20000);
     assert.equal(body.data.tokenLinkSent, true);
     assert.equal(body.data.smsSent, true);
@@ -589,12 +593,12 @@ test("POST /api/v1/appointments with tokenRequested holds the slot, sends the pa
   assert.equal((supabaseClient._tables.Appointment ?? []).length, 0, "no Appointment must exist until Stripe confirms payment");
   assert.equal(supabaseClient._tables.PendingBooking.length, 1);
   assert.equal(twilioClient.calls.sendWhatsApp.length, 1);
-  assert.match(twilioClient.calls.sendWhatsApp[0].body, /checkout\.stripe\.com\/token_1/);
+  assert.match(twilioClient.calls.sendWhatsApp[0].body, /book\.schedurx\.example\/clinic-1\/pay\/pbk_/);
   // SMS has no 24h-session-window restriction (unlike WhatsApp) — sent
   // unconditionally alongside WhatsApp so the patient reliably gets the
   // payment link even when WhatsApp can't deliver it.
   assert.equal(twilioClient.calls.sendSms.length, 1);
-  assert.match(twilioClient.calls.sendSms[0].body, /checkout\.stripe\.com\/token_1/);
+  assert.match(twilioClient.calls.sendSms[0].body, /book\.schedurx\.example\/clinic-1\/pay\/pbk_/);
 });
 
 test("POST /api/v1/appointments with tokenRequested still returns the checkout URL when the WhatsApp send fails", async () => {
@@ -629,7 +633,7 @@ test("POST /api/v1/appointments with tokenRequested still returns the checkout U
     });
     const body = await readJson(response);
     assert.equal(response.status, 200);
-    assert.equal(body.data.checkoutUrl, "https://checkout.stripe.com/token_1");
+    assert.match(body.data.checkoutUrl, /^https:\/\/book\.schedurx\.example\/clinic-1\/pay\/pbk_/);
     assert.equal(body.data.tokenLinkSent, false);
     // SMS is independent of the WhatsApp send — it still goes out (and the
     // checkoutUrl is still returned) even when WhatsApp fails.
@@ -2519,6 +2523,44 @@ test("POST /webhooks/twilio/whatsapp-inbound with a BOOKING deep link attaches a
   assert.equal(thread.scope, "booking");
   assert.equal(thread.appointmentId, "apt_booking_1");
   assert.equal(thread.doctorId, "doc-1");
+});
+
+// Regression: a clinic without whatsappConversationalAi (no assistantModel
+// configured here) used to send the SAME "book here" phone-based link
+// regardless of whether the message resolved to a booking-scoped thread —
+// so someone texting "BOOKING <id>" about an already-confirmed appointment
+// got sent back to "choose a doctor, pick a time" as if they'd never
+// booked, instead of a link to manage the booking they already have.
+test("POST /webhooks/twilio/whatsapp-inbound structured fallback links to the appointment for a booking-scoped thread, not the phone-based intake page", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
+    Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919888888888" }],
+    Appointment: [{ id: "apt_booking_2", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
+
+  const bookingReply = await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+10000000000", Body: "BOOKING apt_booking_2", MessageSid: "SM-booking-3" }),
+    });
+    return response.text();
+  });
+  assert.match(bookingReply, /book\.schedurx\.example\/clinic-1\/apt_booking_2/);
+  assert.doesNotMatch(bookingReply, /919888888888/);
+
+  const generalReply = await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "Hi there", MessageSid: "SM-general-1" }),
+    });
+    return response.text();
+  });
+  assert.match(generalReply, /book\.schedurx\.example\/clinic-1\/%2B919888888888/);
 });
 
 test("POST /webhooks/twilio/whatsapp-inbound rejects a BOOKING deep link when the phone doesn't match the appointment's patient", async () => {

@@ -222,15 +222,27 @@ async function resolveBookingThread(supabaseClient, appointmentId, fromPhone, lo
 // so it doesn't need a Meta Content Template the way a cold outbound message
 // would — sendTemplatedMessage's contentSid path is for outside-24h-session
 // sends, which this isn't.
-function buildStructuredFallbackReply(clinic, callerPhone) {
+//
+// A booking-scoped thread (the caller texted "BOOKING <apt_id>", or is
+// replying inside one already) means we already know exactly which
+// appointment this is about — link straight to its manage page instead of
+// the phone-based fresh-intake entry point, which would otherwise put
+// someone with an existing, already-paid booking back at "choose a doctor,
+// pick a time" as if they'd never booked at all.
+function buildStructuredFallbackReply(clinic, thread) {
+  const isBookingScoped = thread.scope === "booking" && thread.appointmentId;
   const selfServiceUrl = config.PATIENT_APP_BASE_URL
-    ? `${config.PATIENT_APP_BASE_URL}/${clinic.id}/${encodeURIComponent(callerPhone)}`
+    ? `${config.PATIENT_APP_BASE_URL}/${clinic.id}/${isBookingScoped ? thread.appointmentId : encodeURIComponent(thread.contactPhone)}`
     : null;
   const lines = [
     `Thanks for messaging ${clinic.name ?? "our clinic"}! Our team will get back to you shortly.`,
   ];
   if (selfServiceUrl) {
-    lines.push(`To book, reschedule, or cancel an appointment yourself right now: ${selfServiceUrl}`);
+    lines.push(
+      isBookingScoped
+        ? `View or manage your appointment here: ${selfServiceUrl}`
+        : `To book, reschedule, or cancel an appointment yourself right now: ${selfServiceUrl}`,
+    );
   }
   return lines.join(" ");
 }
@@ -253,7 +265,7 @@ async function handleInboundMessage({ supabaseClient, nettuClient, twilioClient,
   if (!assistantModel || !entitlements.whatsappConversationalAi) {
     await classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, log);
     if (!entitlements.whatsappStructuredBooking) return null;
-    const replyText = buildStructuredFallbackReply(clinic, thread.contactPhone);
+    const replyText = buildStructuredFallbackReply(clinic, thread);
     await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
     return replyText;
   }
