@@ -175,7 +175,10 @@ async function resolveBookingThread(supabaseClient, appointmentId, fromPhone, lo
     .select("id, clinicId, doctorId, patientId")
     .eq("id", appointmentId)
     .maybeSingle();
-  if (!appointment?.clinicId) return null;
+  if (!appointment?.clinicId) {
+    log?.debug({ appointmentId }, "[webhooks:twilio] booking-ID deep link: no such appointment — falling back to normal resolution");
+    return null;
+  }
 
   const [{ data: clinic }, { data: patient }] = await Promise.all([
     supabaseClient.from("Clinic").select("*").eq("id", appointment.clinicId).maybeSingle(),
@@ -183,7 +186,13 @@ async function resolveBookingThread(supabaseClient, appointmentId, fromPhone, lo
       ? supabaseClient.from("Patient").select("*").eq("id", appointment.patientId).maybeSingle()
       : Promise.resolve({ data: null }),
   ]);
-  if (!clinic || !patient?.contactNumber) return null;
+  if (!clinic || !patient?.contactNumber) {
+    log?.debug(
+      { appointmentId, hasClinic: !!clinic, hasPatient: !!patient, hasContactNumber: !!patient?.contactNumber },
+      "[webhooks:twilio] booking-ID deep link: clinic or patient/contactNumber missing — falling back to normal resolution",
+    );
+    return null;
+  }
 
   if (!phonesMatch(fromPhone, patient.contactNumber)) {
     log?.warn(
