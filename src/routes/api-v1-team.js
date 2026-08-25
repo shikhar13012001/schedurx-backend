@@ -5,6 +5,7 @@ const tableSvc = require("../services/table-service");
 const staffSvc = require("../services/staff-service");
 const staffInviteSvc = require("../services/staff-invite-service");
 const clinicSvc = require("../services/clinic-service");
+const failedMessageSvc = require("../services/failed-message-service");
 const { normalizeIndianMobile } = require("../lib/phone");
 const { config } = require("../config");
 
@@ -16,11 +17,16 @@ function deliveryResult(result) {
   };
 }
 
-async function sendInviteChannel({ channel, send }, log) {
+// retryPayload carries whatever enqueue() needs to actually resend this
+// exact message later — send() itself only returns Twilio's result, not the
+// options it was called with, so this is passed alongside rather than
+// reconstructed from send's return value.
+async function sendInviteChannel({ channel, send, retryPayload }, supabaseClient, log) {
   try {
     return { channel, ...deliveryResult(await send()) };
   } catch (err) {
     log?.warn({ err, channel }, `[api-v1:team] ${channel} invite send failed — invite still created`);
+    await failedMessageSvc.enqueue(supabaseClient, { channel, purpose: "team_invite", error: err, ...retryPayload }, log);
     return { channel, status: "failed", providerMessageId: null, errorCode: err.code ?? null };
   }
 }
@@ -81,12 +87,29 @@ function createApiV1TeamRouter(supabaseClient, twilioClient) {
           : { to: normalizedPhone, from: clinic?.whatsappFrom, body, clinicId: req.staff.clinicId, purpose: "team_invite" };
 
         delivery = await Promise.all([
-          sendInviteChannel({ channel: "whatsapp", send: () => twilioClient.sendWhatsApp(whatsappOptions) }, req.log),
+          sendInviteChannel(
+            {
+              channel: "whatsapp",
+              send: () => twilioClient.sendWhatsApp(whatsappOptions),
+              retryPayload: {
+                clinicId: req.staff.clinicId,
+                toPhone: normalizedPhone,
+                fromPhone: clinic?.whatsappFrom,
+                body: config.TWILIO_TEAM_INVITE_CONTENT_SID ? undefined : body,
+                contentSid: config.TWILIO_TEAM_INVITE_CONTENT_SID || undefined,
+                contentVariables: config.TWILIO_TEAM_INVITE_CONTENT_SID ? { 1: clinic?.name ?? "the clinic", 2: role, 3: link } : undefined,
+              },
+            },
+            supabaseClient,
+            req.log,
+          ),
           sendInviteChannel(
             {
               channel: "sms",
               send: () => twilioClient.sendSms({ to: normalizedPhone, body, clinicId: req.staff.clinicId, purpose: "team_invite" }),
+              retryPayload: { clinicId: req.staff.clinicId, toPhone: normalizedPhone, body },
             },
+            supabaseClient,
             req.log,
           ),
         ]);

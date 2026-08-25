@@ -5,6 +5,7 @@ const appointmentSvc = require("../services/appointment-service");
 const availabilitySvc = require("../services/availability-service");
 const clinicSvc = require("../services/clinic-service");
 const stripeSvc = require("../services/stripe-service");
+const failedMessageSvc = require("../services/failed-message-service");
 const { config } = require("../config");
 
 // GET /api/v1/appointments?date=YYYY-MM-DD&doctorId=... — clinicId always comes
@@ -141,6 +142,11 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
             smsSent = true;
           } catch (err) {
             req.log?.warn({ err, pendingBookingId: pending.pendingBookingId }, "[api-v1:appointments] token payment SMS failed to send");
+            await failedMessageSvc.enqueue(
+              supabaseClient,
+              { clinicId: req.staff.clinicId, channel: "sms", toPhone: patientRow.contactNumber, body: messageBody, purpose: "token_payment", error: err },
+              req.log,
+            );
           }
         }
 
@@ -153,10 +159,17 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
             // Free-text WhatsApp only delivers inside an open 24h session
             // window (see comms-workflow-service.js) — no approved Content
             // Template exists yet for an ad-hoc payment link, so this can
-            // legitimately fail (routinely, not rarely). The SMS above and
-            // checkoutUrl below both still get the patient/staff a working
-            // link regardless.
+            // legitimately fail (routinely, not rarely — that specific
+            // failure is terminal and enqueue() won't queue it; see
+            // failed-message-service.js's isRetryableError). The SMS above
+            // and checkoutUrl below both still get the patient/staff a
+            // working link regardless.
             req.log?.warn({ err, pendingBookingId: pending.pendingBookingId }, "[api-v1:appointments] token payment WhatsApp link failed to send");
+            await failedMessageSvc.enqueue(
+              supabaseClient,
+              { clinicId: req.staff.clinicId, channel: "whatsapp", toPhone: patientRow.contactNumber, body: messageBody, purpose: "token_payment", error: err },
+              req.log,
+            );
           }
         }
 

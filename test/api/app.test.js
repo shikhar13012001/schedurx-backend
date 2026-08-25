@@ -416,6 +416,7 @@ test("POST /api/v1/team/invites still sends SMS when WhatsApp fails", async () =
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     Clinic: [{ id: "clinic-1", name: "Care Clinic", whatsappFrom: "+14155550100" }],
     StaffInvite: [],
+    FailedMessage: [],
   });
   const twilioClient = createTwilioStub({ shouldFailWhatsApp: true });
   const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, twilioClient });
@@ -435,6 +436,13 @@ test("POST /api/v1/team/invites still sends SMS when WhatsApp fails", async () =
       assert.equal(body.data.delivery.find((item) => item.channel === "whatsapp").status, "failed");
       assert.equal(body.data.delivery.find((item) => item.channel === "sms").status, "queued");
     });
+
+    // The stub's generic WhatsApp failure carries no Twilio error code, so
+    // it's treated as transient and queued for retry — the SMS side
+    // succeeded, so only one row should exist.
+    assert.equal(supabaseClient._tables.FailedMessage.length, 1);
+    assert.equal(supabaseClient._tables.FailedMessage[0].channel, "whatsapp");
+    assert.equal(supabaseClient._tables.FailedMessage[0].purpose, "team_invite");
   } finally {
     config.DASHBOARD_BASE_URL = previousBaseUrl;
   }
@@ -609,6 +617,7 @@ test("POST /api/v1/appointments with tokenRequested still returns the checkout U
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     Clinic: [tokenClinicRow()],
     Doctor: [tokenDoctorRow()],
+    FailedMessage: [],
   });
   const twilioClient = createTwilioStub({ shouldFailWhatsApp: true });
   const app = createApp({
@@ -639,6 +648,12 @@ test("POST /api/v1/appointments with tokenRequested still returns the checkout U
     // checkoutUrl is still returned) even when WhatsApp fails.
     assert.equal(body.data.smsSent, true);
   });
+
+  // The stub's generic WhatsApp failure carries no Twilio error code, so
+  // it's treated as transient and queued for retry.
+  assert.equal(supabaseClient._tables.FailedMessage.length, 1);
+  assert.equal(supabaseClient._tables.FailedMessage[0].channel, "whatsapp");
+  assert.equal(supabaseClient._tables.FailedMessage[0].purpose, "token_payment");
 });
 
 test("GET /api/v1/public/pending-bookings/:id returns a public-safe summary", async () => {
