@@ -65,14 +65,36 @@ function enabledWorkflowsFor(clinic, triggers) {
   );
 }
 
+// The "reminder" trigger (appt_reminder_1h_v1 — its body just states the
+// appointment time, no "1 hour" wording baked in, so the same approved
+// template is safe to reuse at either lead time) degrades to whatever lead
+// time booking-time actually leaves: 1h before if there's room, else 15min
+// before, else it's skipped rather than firing "late" (in the past, which
+// nettu never fires) or right on top of the appointment itself. Tiers must
+// stay sorted descending — resolveReminderOffset picks the first one the
+// booking has room for.
+const REMINDER_LEAD_TIERS_MINUTES = [60, 15];
+
+function resolveReminderOffset(leadMinutes) {
+  return REMINDER_LEAD_TIERS_MINUTES.find((tier) => leadMinutes >= tier) ?? null;
+}
+
 // Extra nettu reminders-array entries for this appointment's delayed
 // workflows — appended alongside (not replacing) the existing staff -15min
-// entry in appointment-service.js.
-function buildDelayedReminderEntries(clinic, appointmentId) {
-  return enabledWorkflowsFor(clinic, DELAYED_TRIGGERS).map((w) => ({
-    delta: w.offsetMinutes ?? 0,
-    identifier: `${appointmentId}::${w.id}`,
-  }));
+// entry in appointment-service.js. startMs is the appointment's own start
+// (booking time is "now") — only the "reminder" trigger's offset adapts to
+// it; the other delayed triggers keep their clinic-configured offset as-is.
+function buildDelayedReminderEntries(clinic, appointmentId, startMs) {
+  const leadMinutes = (startMs - Date.now()) / 60_000;
+  return enabledWorkflowsFor(clinic, DELAYED_TRIGGERS)
+    .map((w) => {
+      if (w.trigger === "reminder") {
+        const offset = resolveReminderOffset(leadMinutes);
+        return offset == null ? null : { delta: -offset, identifier: `${appointmentId}::${w.id}` };
+      }
+      return { delta: w.offsetMinutes ?? 0, identifier: `${appointmentId}::${w.id}` };
+    })
+    .filter(Boolean);
 }
 
 async function recordReminder(supabaseClient, { appointmentId, type, channel, status, sentAt }) {

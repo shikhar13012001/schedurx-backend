@@ -174,7 +174,7 @@ async function validateAndReserveSlot(nettuClient, supabaseClient, opts, log, tw
   // they only ever get the staff entry, never workflow ones.
   const reminders = [
     { delta: -REMINDER_MINUTES_BEFORE, identifier: appointmentId },
-    ...(isBlocked ? [] : commsWorkflowSvc.buildDelayedReminderEntries(clinic, appointmentId)),
+    ...(isBlocked ? [] : commsWorkflowSvc.buildDelayedReminderEntries(clinic, appointmentId, startMs)),
   ];
 
   let nettuEvent;
@@ -629,7 +629,7 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
   // booking-time snapshot).
   const reminders = [
     { delta: -REMINDER_MINUTES_BEFORE, identifier: appointmentId },
-    ...(isBlocked ? [] : commsWorkflowSvc.buildDelayedReminderEntries(clinic, appointmentId)),
+    ...(isBlocked ? [] : commsWorkflowSvc.buildDelayedReminderEntries(clinic, appointmentId, newStartMs)),
   ];
 
   let newNettuEvent = null;

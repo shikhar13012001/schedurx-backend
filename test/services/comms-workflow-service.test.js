@@ -26,6 +26,8 @@ function makeClinic(overrides = {}) {
 }
 
 describe("buildDelayedReminderEntries", () => {
+  const HOUR_MS = 60 * 60_000;
+
   test("builds one composite-identifier entry per enabled, channel-allowed delayed workflow", () => {
     const clinic = makeClinic({
       settings: {
@@ -33,10 +35,10 @@ describe("buildDelayedReminderEntries", () => {
           channelsEnabled: ["whatsapp"],
           workflows: [
             {
-              id: "reminder-24h",
+              id: "reminder-1h",
               trigger: "reminder",
               channel: "whatsapp",
-              offsetMinutes: -1440,
+              offsetMinutes: -60,
               enabled: true,
               template: "...",
             },
@@ -52,9 +54,10 @@ describe("buildDelayedReminderEntries", () => {
         },
       },
     });
-    const entries = buildDelayedReminderEntries(clinic, "apt_1");
+    // Plenty of lead time (2h), so the "reminder" trigger gets its full 1h-before tier.
+    const entries = buildDelayedReminderEntries(clinic, "apt_1", Date.now() + 2 * HOUR_MS);
     assert.deepEqual(entries, [
-      { delta: -1440, identifier: "apt_1::reminder-24h" },
+      { delta: -60, identifier: "apt_1::reminder-1h" },
       { delta: 150, identifier: "apt_1::review-2h-after" },
     ]);
   });
@@ -85,7 +88,7 @@ describe("buildDelayedReminderEntries", () => {
         },
       },
     });
-    assert.deepEqual(buildDelayedReminderEntries(clinic, "apt_1"), []);
+    assert.deepEqual(buildDelayedReminderEntries(clinic, "apt_1", Date.now() + 2 * HOUR_MS), []);
   });
 
   test("skips a workflow whose channel isn't enabled for the clinic", () => {
@@ -95,10 +98,10 @@ describe("buildDelayedReminderEntries", () => {
           channelsEnabled: ["sms"], // whatsapp not enabled
           workflows: [
             {
-              id: "reminder-24h",
+              id: "reminder-1h",
               trigger: "reminder",
               channel: "whatsapp",
-              offsetMinutes: -1440,
+              offsetMinutes: -60,
               enabled: true,
               template: "...",
             },
@@ -106,11 +109,72 @@ describe("buildDelayedReminderEntries", () => {
         },
       },
     });
-    assert.deepEqual(buildDelayedReminderEntries(clinic, "apt_1"), []);
+    assert.deepEqual(buildDelayedReminderEntries(clinic, "apt_1", Date.now() + 2 * HOUR_MS), []);
   });
 
   test("returns [] when settings.communication is absent entirely", () => {
-    assert.deepEqual(buildDelayedReminderEntries({ id: "clinic-1" }, "apt_1"), []);
+    assert.deepEqual(buildDelayedReminderEntries({ id: "clinic-1" }, "apt_1", Date.now() + 2 * HOUR_MS), []);
+  });
+
+  describe("the 'reminder' trigger's lead-time fallback (1h -> 15m -> skip)", () => {
+    function reminderClinic() {
+      return makeClinic({
+        settings: {
+          communication: {
+            channelsEnabled: ["whatsapp"],
+            workflows: [
+              {
+                id: "reminder-1h",
+                trigger: "reminder",
+                channel: "whatsapp",
+                offsetMinutes: -60,
+                enabled: true,
+                template: "...",
+              },
+            ],
+          },
+        },
+      });
+    }
+
+    test("uses the 1h-before tier when there's at least an hour of lead time", () => {
+      const entries = buildDelayedReminderEntries(reminderClinic(), "apt_1", Date.now() + 90 * 60_000);
+      assert.deepEqual(entries, [{ delta: -60, identifier: "apt_1::reminder-1h" }]);
+    });
+
+    test("falls back to the 15m-before tier when there's under an hour but at least 15 minutes", () => {
+      const entries = buildDelayedReminderEntries(reminderClinic(), "apt_1", Date.now() + 30 * 60_000);
+      assert.deepEqual(entries, [{ delta: -15, identifier: "apt_1::reminder-1h" }]);
+    });
+
+    test("skips the reminder entirely when there's under 15 minutes of lead time", () => {
+      const entries = buildDelayedReminderEntries(reminderClinic(), "apt_1", Date.now() + 10 * 60_000);
+      assert.deepEqual(entries, []);
+    });
+
+    test("a non-reminder delayed trigger keeps its configured offset regardless of lead time", () => {
+      const clinic = makeClinic({
+        settings: {
+          communication: {
+            channelsEnabled: ["whatsapp"],
+            workflows: [
+              {
+                id: "post-visit",
+                trigger: "post_appointment",
+                channel: "whatsapp",
+                offsetMinutes: 60,
+                enabled: true,
+                template: "...",
+              },
+            ],
+          },
+        },
+      });
+      // Only 5 minutes of lead time — would skip a "reminder" trigger, but
+      // post_appointment isn't lead-time-sensitive (it fires after start).
+      const entries = buildDelayedReminderEntries(clinic, "apt_1", Date.now() + 5 * 60_000);
+      assert.deepEqual(entries, [{ delta: 60, identifier: "apt_1::post-visit" }]);
+    });
   });
 });
 
