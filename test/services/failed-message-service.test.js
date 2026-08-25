@@ -128,6 +128,55 @@ describe("processDue", () => {
     assert.equal(row.attempts, 3);
   });
 
+  test("exhaustion sends an alert email when an emailClient is provided", async () => {
+    const supabaseClient = createTableStub({ FailedMessage: [dueRow({ attempts: 2, maxAttempts: 3, purpose: "booking_confirmed" })] });
+    const twilioClient = {
+      async sendSms() {
+        throw new Error("still failing");
+      },
+    };
+    const alerts = [];
+    const emailClient = { async sendAlert(opts) { alerts.push(opts); } };
+
+    await failedMessageSvc.processDue(supabaseClient, twilioClient, null, emailClient);
+
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].subject, /booking_confirmed/);
+    assert.match(alerts[0].text, /\+919888888888/);
+  });
+
+  test("does not email when the retry still has attempts left (not yet exhausted)", async () => {
+    const supabaseClient = createTableStub({ FailedMessage: [dueRow({ attempts: 0, maxAttempts: 3 })] });
+    const twilioClient = {
+      async sendSms() {
+        throw new Error("still failing");
+      },
+    };
+    const alerts = [];
+    const emailClient = { async sendAlert(opts) { alerts.push(opts); } };
+
+    await failedMessageSvc.processDue(supabaseClient, twilioClient, null, emailClient);
+
+    assert.equal(alerts.length, 0);
+  });
+
+  test("a failed emailClient.sendAlert never breaks retry processing itself", async () => {
+    const supabaseClient = createTableStub({ FailedMessage: [dueRow({ attempts: 2, maxAttempts: 3 })] });
+    const twilioClient = {
+      async sendSms() {
+        throw new Error("still failing");
+      },
+    };
+    const emailClient = {
+      async sendAlert() {
+        throw new Error("SMTP down too");
+      },
+    };
+
+    await assert.doesNotReject(() => failedMessageSvc.processDue(supabaseClient, twilioClient, null, emailClient));
+    assert.equal(supabaseClient._tables.FailedMessage[0].status, "exhausted");
+  });
+
   test("a resend that now fails with a terminal error is exhausted immediately, regardless of attempts left", async () => {
     const supabaseClient = createTableStub({ FailedMessage: [dueRow({ attempts: 0, maxAttempts: 3 })] });
     const twilioClient = {

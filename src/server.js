@@ -101,6 +101,24 @@ function buildAssistantModel() {
   }
 }
 
+function buildEmailClient() {
+  if (!config.ALERT_EMAIL_GMAIL_USER || !config.ALERT_EMAIL_GMAIL_APP_PASSWORD) {
+    logger.warn("[startup] Alert email not configured — retry-exhaustion alerts will only be logged, not emailed");
+    return null;
+  }
+  try {
+    const { createEmailClient } = require("./services/email-service");
+    return createEmailClient({
+      gmailUser: config.ALERT_EMAIL_GMAIL_USER,
+      gmailAppPassword: config.ALERT_EMAIL_GMAIL_APP_PASSWORD,
+      alertTo: config.ALERT_EMAIL_TO,
+    });
+  } catch (err) {
+    logger.error({ err }, "[startup] Email client construction failed — retry-exhaustion alerts will only be logged");
+    return null;
+  }
+}
+
 function buildElevenLabsClient() {
   if (!config.ELEVENLABS_API_KEY) {
     logger.warn("[startup] ElevenLabs not configured — voice synthesis (Ask ScheduRx speech, greeting audio) disabled");
@@ -178,6 +196,7 @@ async function start() {
   const assistantModel = buildAssistantModel();
   const twilioClient = buildTwilioClient(supabaseClient);
   const elevenLabsClient = buildElevenLabsClient();
+  const emailClient = buildEmailClient();
 
   const app = createApp({
     supabaseClient,
@@ -212,7 +231,7 @@ async function start() {
   // (5min/30min/2h) so a due retry doesn't sit waiting on this tick alone.
   const failedMessageSvc = require("./services/failed-message-service");
   setInterval(() => {
-    failedMessageSvc.processDue(supabaseClient, twilioClient, logger).catch((err) => {
+    failedMessageSvc.processDue(supabaseClient, twilioClient, logger, emailClient).catch((err) => {
       logger.error({ err }, "[startup] failed-message retry tick failed");
     });
   }, 2 * 60_000).unref();

@@ -12,12 +12,16 @@
 //
 // Exit code 0 = healthy, 1 = unhealthy — meant to be run on a schedule (see
 // the systemd timer this ships alongside) so a stuck webhook shows up in
-// journalctl within minutes instead of silently sitting broken.
+// journalctl within minutes instead of silently sitting broken. Also emails
+// ALERT_EMAIL_TO when unhealthy (see email-service.js) — logs alone are
+// only useful to someone who thinks to go look; this is what actually
+// closes the "nobody knew" gap tonight's incident exposed.
 //
 // Usage: node scripts/check-stripe-webhook-health.js
 
 require("dotenv").config();
 const Stripe = require("stripe");
+const { createEmailClient } = require("../src/services/email-service");
 
 const PENDING_THRESHOLD_MINUTES = 5;
 const EVENT_TYPES_TO_CHECK = [
@@ -34,22 +38,25 @@ if (!process.env.STRIPE_SECRET_KEY) {
 }
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const emailClient = createEmailClient({
+  gmailUser: process.env.ALERT_EMAIL_GMAIL_USER,
+  gmailAppPassword: process.env.ALERT_EMAIL_GMAIL_APP_PASSWORD,
+  alertTo: process.env.ALERT_EMAIL_TO,
+});
 
 async function main() {
-  let healthy = true;
+  const problems = [];
 
   // 1. Endpoint status — expects exactly one endpoint pointed at our own
   // domain (not third-party integrations sharing this Stripe account).
   const endpoints = await stripe.webhookEndpoints.list({ limit: 20 });
   const ours = endpoints.data.filter((e) => e.url.includes("schedurx.com"));
   if (ours.length === 0) {
-    console.error("[webhook-health] UNHEALTHY — no webhook endpoint configured for a schedurx.com URL at all.");
-    healthy = false;
+    problems.push("No webhook endpoint configured for a schedurx.com URL at all.");
   }
   for (const endpoint of ours) {
     if (endpoint.status !== "enabled") {
-      console.error(`[webhook-health] UNHEALTHY — endpoint ${endpoint.id} (${endpoint.url}) status is '${endpoint.status}', not 'enabled'.`);
-      healthy = false;
+      problems.push(`Endpoint ${endpoint.id} (${endpoint.url}) status is '${endpoint.status}', not 'enabled'.`);
     } else {
       console.log(`[webhook-health] OK — endpoint ${endpoint.id} (${endpoint.url}) is enabled.`);
     }
@@ -69,16 +76,31 @@ async function main() {
     const events = await stripe.events.list({ type, created: { gte: lookbackSec }, limit: 10 });
     const stuck = events.data.filter((e) => e.pending_webhooks > 0 && e.created * 1000 < cutoffMs);
     for (const event of stuck) {
-      console.error(
-        `[webhook-health] UNHEALTHY — ${event.id} (${type}, created ${new Date(event.created * 1000).toISOString()}) ` +
-          `still has pending_webhooks=${event.pending_webhooks} after ${PENDING_THRESHOLD_MINUTES}+ minutes.`,
+      problems.push(
+        `${event.id} (${type}, created ${new Date(event.created * 1000).toISOString()}) still has ` +
+          `pending_webhooks=${event.pending_webhooks} after ${PENDING_THRESHOLD_MINUTES}+ minutes.`,
       );
-      healthy = false;
     }
   }
 
+  const healthy = problems.length === 0;
   if (healthy) {
     console.log("[webhook-health] All checks passed.");
+  } else {
+    problems.forEach((p) => console.error(`[webhook-health] UNHEALTHY — ${p}`));
+    if (emailClient) {
+      try {
+        await emailClient.sendAlert({
+          subject: "Stripe webhook unhealthy",
+          text: `The Stripe webhook health check found ${problems.length} problem(s):\n\n${problems.map((p) => `- ${p}`).join("\n")}\n\nCheck: node scripts/check-stripe-webhook-health.js on the droplet for the current state.`,
+        });
+        console.log("[webhook-health] Alert email sent.");
+      } catch (err) {
+        console.error("[webhook-health] Failed to send alert email:", err);
+      }
+    } else {
+      console.log("[webhook-health] ALERT_EMAIL_GMAIL_USER/ALERT_EMAIL_GMAIL_APP_PASSWORD not configured — no alert email sent.");
+    }
   }
   process.exit(healthy ? 0 : 1);
 }

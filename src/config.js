@@ -156,6 +156,23 @@ const schema = z.object({
   // own origin) is always allowed in addition to whatever's listed here, so
   // this is normally only needed for a local-dev origin that differs from it.
   PUBLIC_CORS_ALLOWED_ORIGIN: z.string().optional(),
+
+  // ── Ops alert email (email-service.js) — a Stripe webhook going unhealthy
+  // (scripts/check-stripe-webhook-health.js) or a message exhausting its
+  // retries (failed-message-service.js) sends one plain-text email here
+  // instead of only ever sitting in journalctl/the database waiting for
+  // someone to happen to look. Gmail SMTP + an App Password (requires 2FA
+  // enabled on the account — myaccount.google.com/apppasswords), not a
+  // transactional email API, since this is low-volume (only fires on real
+  // failures) and needs zero new account signup. Left unset, alerts are
+  // still logged, just never emailed — same graceful-degrade posture as
+  // every other optional integration in this file.
+  ALERT_EMAIL_GMAIL_USER: z.string().email().optional(),
+  ALERT_EMAIL_GMAIL_APP_PASSWORD: z.string().optional(),
+  // Defaults to ALERT_EMAIL_GMAIL_USER itself (mail yourself) if unset —
+  // override only if alerts should go somewhere other than the sending
+  // account, e.g. a shared ops inbox.
+  ALERT_EMAIL_TO: z.string().email().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

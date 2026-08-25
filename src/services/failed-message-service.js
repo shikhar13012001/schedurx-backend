@@ -71,8 +71,11 @@ async function enqueue(supabaseClient, { clinicId, channel, toPhone, fromPhone, 
 // Run periodically (see server.js) — attempts every row whose
 // nextAttemptAt has passed. Never throws; a single row's failure (or a
 // crash mid-batch) must not stop the rest of the queue from being
-// processed on the next tick.
-async function processDue(supabaseClient, twilioClient, log) {
+// processed on the next tick. emailClient is optional (see
+// email-service.js) — a message reaching 'exhausted' means every automatic
+// retry is done and a human needs to look at it, which is exactly the kind
+// of thing that otherwise sits invisible in a database table.
+async function processDue(supabaseClient, twilioClient, log, emailClient) {
   if (!twilioClient) return { attempted: 0 };
 
   const { data: due, error } = await supabaseClient
@@ -119,6 +122,19 @@ async function processDue(supabaseClient, twilioClient, log) {
         })
         .eq("id", row.id);
       log?.warn({ err, id: row.id, purpose: row.purpose, attempts, exhausted }, "[failedMessageSvc] retry failed");
+      if (exhausted && emailClient) {
+        try {
+          await emailClient.sendAlert({
+            subject: `Message delivery exhausted (${row.purpose ?? row.channel})`,
+            text:
+              `A ${row.channel} message to ${row.toPhone} (purpose: ${row.purpose ?? "unknown"}, clinic: ${row.clinicId ?? "unknown"}) ` +
+              `failed all ${attempts} attempts and will not be retried again.\n\nLast error: ${err?.message ?? String(err)}\n\n` +
+              `FailedMessage id: ${row.id}`,
+          });
+        } catch (emailErr) {
+          log?.error({ err: emailErr, id: row.id }, "[failedMessageSvc] failed to send exhaustion alert email");
+        }
+      }
     }
   }
   return { attempted };
