@@ -151,24 +151,45 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
           }
         }
 
+        // Approved WhatsApp Content Template (booking_payment_request_v1) —
+        // a business-initiated send, so it delivers regardless of an open
+        // 24h session window, unlike the free-text body used as a fallback
+        // below it never needed. Its own call-to-action button URL is
+        // template-side "https://book.schedurx.com/{{4}}" — {{4}} must be
+        // just the path (clinicId/pay/pendingBookingId), never the full
+        // https://book.schedurx.com/... URL, or the link doubles the domain.
+        const paymentContentSid = "HXcc6ee28e90e16636d0f4f399127dd5f0";
+        const paymentContentVariables = {
+          "1": patientRow.fullName || "there",
+          "2": String(Math.round(pending.amountPaise / 100)),
+          "3": clinic?.name ?? "the clinic",
+          "4": `${req.staff.clinicId}/pay/${pending.pendingBookingId}`,
+        };
+
         let tokenLinkSent = false;
         if (twilioClient && patientRow.contactNumber) {
           try {
-            await twilioClient.sendWhatsApp({ to: patientRow.contactNumber, body: messageBody, clinicId: req.staff.clinicId, purpose: "token_payment" });
+            await twilioClient.sendWhatsApp({
+              to: patientRow.contactNumber,
+              contentSid: paymentContentSid,
+              contentVariables: paymentContentVariables,
+              clinicId: req.staff.clinicId,
+              purpose: "token_payment",
+            });
             tokenLinkSent = true;
           } catch (err) {
-            // Free-text WhatsApp only delivers inside an open 24h session
-            // window (see comms-workflow-service.js) — no approved Content
-            // Template exists yet for an ad-hoc payment link, so this can
-            // legitimately fail (routinely, not rarely — that specific
-            // failure is terminal and enqueue() won't queue it; see
-            // failed-message-service.js's isRetryableError). The SMS above
-            // and checkoutUrl below both still get the patient/staff a
-            // working link regardless.
             req.log?.warn({ err, pendingBookingId: pending.pendingBookingId }, "[api-v1:appointments] token payment WhatsApp link failed to send");
             await failedMessageSvc.enqueue(
               supabaseClient,
-              { clinicId: req.staff.clinicId, channel: "whatsapp", toPhone: patientRow.contactNumber, body: messageBody, purpose: "token_payment", error: err },
+              {
+                clinicId: req.staff.clinicId,
+                channel: "whatsapp",
+                toPhone: patientRow.contactNumber,
+                contentSid: paymentContentSid,
+                contentVariables: paymentContentVariables,
+                purpose: "token_payment",
+                error: err,
+              },
               req.log,
             );
           }

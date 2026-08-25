@@ -601,7 +601,13 @@ test("POST /api/v1/appointments with tokenRequested holds the slot, sends the pa
   assert.equal((supabaseClient._tables.Appointment ?? []).length, 0, "no Appointment must exist until Stripe confirms payment");
   assert.equal(supabaseClient._tables.PendingBooking.length, 1);
   assert.equal(twilioClient.calls.sendWhatsApp.length, 1);
-  assert.match(twilioClient.calls.sendWhatsApp[0].body, /book\.schedurx\.example\/clinic-1\/pay\/pbk_/);
+  // Business-initiated via the approved booking_payment_request_v1 Content
+  // Template (delivers regardless of an open 24h session window), not a
+  // free-text send — {{4}} must be just the path, since the template's own
+  // call-to-action button URL is "https://book.schedurx.com/{{4}}".
+  assert.equal(twilioClient.calls.sendWhatsApp[0].contentSid, "HXcc6ee28e90e16636d0f4f399127dd5f0");
+  assert.match(twilioClient.calls.sendWhatsApp[0].contentVariables["4"], /^clinic-1\/pay\/pbk_/);
+  assert.equal(twilioClient.calls.sendWhatsApp[0].contentVariables["4"].startsWith("https://"), false);
   // SMS has no 24h-session-window restriction (unlike WhatsApp) — sent
   // unconditionally alongside WhatsApp so the patient reliably gets the
   // payment link even when WhatsApp can't deliver it.
@@ -654,6 +660,7 @@ test("POST /api/v1/appointments with tokenRequested still returns the checkout U
   assert.equal(supabaseClient._tables.FailedMessage.length, 1);
   assert.equal(supabaseClient._tables.FailedMessage[0].channel, "whatsapp");
   assert.equal(supabaseClient._tables.FailedMessage[0].purpose, "token_payment");
+  assert.equal(supabaseClient._tables.FailedMessage[0].contentSid, "HXcc6ee28e90e16636d0f4f399127dd5f0");
 });
 
 test("GET /api/v1/public/pending-bookings/:id returns a public-safe summary", async () => {
