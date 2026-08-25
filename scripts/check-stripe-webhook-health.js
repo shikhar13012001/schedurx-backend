@@ -55,10 +55,18 @@ async function main() {
     }
   }
 
-  // 2. Recent events actually reaching us.
+  // 2. Recent events actually reaching us. Bounded to the last hour (well
+  // past PENDING_THRESHOLD_MINUTES) — without a `created` filter,
+  // events.list's "last 10 of this type" can mean literally the last 10
+  // ever for a rare event type like customer.subscription.*, so a handful
+  // of stale test-mode events from days ago would flag UNHEALTHY on every
+  // single run forever, since nothing new ever pushes them out of the
+  // window. A health check nobody can trust because it never stops
+  // complaining is worse than no health check.
   const cutoffMs = Date.now() - PENDING_THRESHOLD_MINUTES * 60_000;
+  const lookbackSec = Math.floor((Date.now() - 60 * 60_000) / 1000);
   for (const type of EVENT_TYPES_TO_CHECK) {
-    const events = await stripe.events.list({ type, limit: 10 });
+    const events = await stripe.events.list({ type, created: { gte: lookbackSec }, limit: 10 });
     const stuck = events.data.filter((e) => e.pending_webhooks > 0 && e.created * 1000 < cutoffMs);
     for (const event of stuck) {
       console.error(
