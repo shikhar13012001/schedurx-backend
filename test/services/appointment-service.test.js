@@ -499,6 +499,111 @@ describe("markCompleted / revertCompleted", () => {
     const supabaseClient = seed();
     await assert.doesNotReject(() => revertCompleted(supabaseClient, { appointmentId: "nope", clinicId: "clinic-1" }));
   });
+
+  describe("with a real patient — Visit guarantee + thank-you send", () => {
+    function seedClinic(overrides = {}) {
+      return {
+        id: "clinic-1",
+        status: "active",
+        name: "Nirmaya Clinic",
+        phone: "+919999999999",
+        timezone: "Asia/Kolkata",
+        openingHour: 9,
+        closingHour: 18,
+        settings: {
+          communication: {
+            channelsEnabled: ["sms"],
+            workflows: [
+              {
+                id: "post-visit-sms",
+                trigger: "post_appointment",
+                channel: "sms",
+                enabled: true,
+                template: "Hi {{patientName}}, thank you for visiting {{doctorName}} at {{clinicName}} today.",
+              },
+            ],
+          },
+        },
+        ...overrides,
+      };
+    }
+
+    function seedFull({ visits = [] } = {}) {
+      return createTableStub({
+        Clinic: [seedClinic()],
+        Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
+        Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul", contactNumber: "+919888888888" }],
+        Appointment: [
+          {
+            id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1",
+            timeslot: new Date().toISOString(), symptoms: "Fever", mode: "clinic",
+            status: "booked", auditHistory: [],
+          },
+        ],
+        Visit: visits,
+      });
+    }
+
+    test("creates a bare Visit row when the doctor never ran ambient capture/Recap", async () => {
+      const supabaseClient = seedFull();
+      const twilioClient = createTwilioStub();
+      await markCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, twilioClient);
+
+      const visits = supabaseClient._tables.Visit;
+      assert.equal(visits.length, 1);
+      assert.equal(visits[0].patientId, "pat-1");
+      assert.equal(visits[0].appointmentId, "apt_1");
+      assert.equal(visits[0].symptoms, "Fever");
+    });
+
+    test("reuses today's existing Visit instead of creating a duplicate when ambient capture already ran", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const supabaseClient = seedFull({
+        visits: [{ id: "visit_existing", clinicId: "clinic-1", patientId: "pat-1", visitDate: today, notes: "Real ambient-capture note", createdAt: new Date().toISOString() }],
+      });
+      const twilioClient = createTwilioStub();
+      await markCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, twilioClient);
+
+      const visits = supabaseClient._tables.Visit;
+      assert.equal(visits.length, 1);
+      assert.equal(visits[0].id, "visit_existing");
+      assert.equal(visits[0].notes, "Real ambient-capture note");
+    });
+
+    test("fires the clinic's configured post_appointment thank-you workflow", async () => {
+      const supabaseClient = seedFull();
+      const twilioClient = createTwilioStub();
+      await markCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, twilioClient);
+
+      assert.equal(twilioClient.calls.sendSms.length, 1);
+      assert.equal(twilioClient.calls.sendSms[0].to, "+919888888888");
+      assert.match(twilioClient.calls.sendSms[0].body, /Hi Rahul, thank you for visiting Dr\. Priya at Nirmaya Clinic today\./);
+    });
+
+    test("neither a Visit-write failure nor a messaging failure blocks the completion itself", async () => {
+      const supabaseClient = seedFull();
+      const throwingTwilio = {
+        sendSms: async () => { throw new Error("Twilio is down"); },
+        sendWhatsApp: async () => { throw new Error("Twilio is down"); },
+      };
+      const result = await markCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, throwingTwilio);
+      assert.equal(result.status, "completed");
+      assert.equal(supabaseClient._tables.Appointment[0].status, "completed");
+    });
+
+    test("does nothing patient-related for a blocked-time entry (no patientId)", async () => {
+      const supabaseClient = createTableStub({
+        Clinic: [seedClinic()],
+        Appointment: [{ id: "apt_block", clinicId: "clinic-1", doctorId: "doc-1", patientId: null, status: "booked", auditHistory: [] }],
+        Visit: [],
+      });
+      const twilioClient = createTwilioStub();
+      const result = await markCompleted(supabaseClient, { appointmentId: "apt_block", clinicId: "clinic-1" }, null, twilioClient);
+      assert.equal(result.status, "completed");
+      assert.equal(supabaseClient._tables.Visit.length, 0);
+      assert.equal(twilioClient.calls.sendSms.length, 0);
+    });
+  });
 });
 
 describe("markNoShow", () => {

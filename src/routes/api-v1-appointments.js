@@ -17,11 +17,12 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
   const router = Router();
 
   router.get("/", async (req, res) => {
-    const { date, doctorId } = req.query;
+    const { date, doctorId, patientId } = req.query;
     try {
       const appointments = await tableSvc.listAppointmentsForClinic(supabaseClient, req.staff.clinicId, {
         date,
         doctorId,
+        patientId,
       });
       return ok(res, { appointments });
     } catch (err) {

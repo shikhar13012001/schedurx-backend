@@ -6,6 +6,7 @@ const clinicSvc = require("./clinic-service");
 const doctorSvc = require("./doctor-service");
 const { epochToISO, formatHumanTime, toDateString } = require("./availability-service");
 const commsWorkflowSvc = require("./comms-workflow-service");
+const visitSvc = require("./visit-service");
 const { config } = require("../config");
 
 // Same relative-path shape as routes/tool-helpers.js's formUrl() (used by the
@@ -899,10 +900,10 @@ async function cancelAppointment(nettuClient, supabaseClient, opts, log, twilioC
 // move the Appointment row's own status (+ audit trail), plus a no-show's
 // best-effort patient-facing nudge.
 
-async function markCompleted(supabaseClient, { appointmentId, clinicId }, log) {
+async function markCompleted(supabaseClient, { appointmentId, clinicId }, log, twilioClient) {
   const { data: appt, error: fetchErr } = await supabaseClient
     .from("Appointment")
-    .select("id, clinicId, status, auditHistory")
+    .select("id, clinicId, doctorId, patientId, timeslot, symptoms, mode, status, auditHistory")
     .eq("id", appointmentId)
     .maybeSingle();
   if (fetchErr)
@@ -914,7 +915,8 @@ async function markCompleted(supabaseClient, { appointmentId, clinicId }, log) {
     });
   }
   // Idempotent — advancing the queue past someone already marked complete
-  // (e.g. a double "next" click racing itself) shouldn't error.
+  // (e.g. a double "next" click racing itself) shouldn't error, and
+  // shouldn't re-fire the thank-you message a second time.
   if (appt.status === "completed") return { appointmentId, status: "completed" };
 
   const currentHistory = Array.isArray(appt.auditHistory) ? appt.auditHistory : [];
@@ -933,6 +935,58 @@ async function markCompleted(supabaseClient, { appointmentId, clinicId }, log) {
       statusCode: 500,
     });
   }
+
+  // Best-effort from here on — neither the Visit guarantee nor the
+  // thank-you send should undo or fail the completion itself, same posture
+  // as every other comms trigger in this file.
+  if (appt.patientId) {
+    try {
+      await visitSvc.findOrCreateTodaysVisit(supabaseClient, {
+        clinicId,
+        patientId: appt.patientId,
+        doctorId: appt.doctorId,
+        appointmentId,
+        mode: appt.mode,
+        symptoms: appt.symptoms,
+      });
+    } catch (err) {
+      log?.error({ err, appointmentId }, "[appointmentSvc] couldn't guarantee a Visit row on completion");
+    }
+
+    try {
+      const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
+      const clinicRules = clinicSvc.getSchedulingRules(clinic ?? {});
+      const [{ data: patient }, { data: doctor }] = await Promise.all([
+        supabaseClient.from("Patient").select("fullName, contactNumber").eq("id", appt.patientId).maybeSingle(),
+        appt.doctorId
+          ? supabaseClient.from("Doctor").select("fullName").eq("id", appt.doctorId).maybeSingle()
+          : Promise.resolve({ data: null }),
+      ]);
+      if (patient?.contactNumber) {
+        await commsWorkflowSvc.sendImmediateWorkflowMessages(
+          {
+            supabaseClient,
+            twilioClient,
+            clinic,
+            trigger: "post_appointment",
+            appointmentId,
+            toPhone: patient.contactNumber,
+            data: {
+              clinicName: clinic?.name,
+              clinicPhone: clinic?.phone,
+              doctorName: doctor?.fullName,
+              patientName: patient.fullName,
+              apptTime: appt.timeslot ? formatHumanTime(new Date(appt.timeslot).getTime(), clinicRules.timezone) : null,
+            },
+          },
+          log,
+        );
+      }
+    } catch (err) {
+      log?.error({ err, appointmentId }, "[appointmentSvc] post-appointment thank-you send failed");
+    }
+  }
+
   return { appointmentId, status: "completed" };
 }
 

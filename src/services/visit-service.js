@@ -64,6 +64,42 @@ async function createVisit(supabaseClient, opts) {
   return data;
 }
 
+// Idempotent counterpart to createVisit — used where nothing has already
+// confirmed whether today's Visit exists (appointment-service.js's
+// markCompleted, fired when a queue check-in finishes, whether or not the
+// doctor ever ran ambient capture/Recap during the consult). If ambient
+// capture already created today's row, this finds and returns it as-is
+// rather than creating a duplicate; if not, it creates a bare one so the
+// patient's visit history and count are never silently empty just because
+// nobody tapped the mic.
+async function findOrCreateTodaysVisit(supabaseClient, opts) {
+  const { clinicId, patientId, visitDate } = opts;
+  if (!clinicId || !patientId) {
+    throw Object.assign(new Error("clinicId and patientId are required"), { code: "MISSING_FIELDS", statusCode: 422 });
+  }
+  const date = visitDate ?? new Date().toISOString().slice(0, 10);
+
+  // Same "patientId + today's date" scope the client-side check in
+  // now-serving.tsx already uses — not appointment-scoped (a patient with
+  // two same-day appointments already shares one Visit row today; matching
+  // that rather than redesigning visit identity here). Ordered so a patient
+  // with more than one row for the date deterministically resolves to the
+  // most recent rather than arbitrary DB order.
+  const { data: existing, error: findErr } = await supabaseClient
+    .from("Visit")
+    .select("*")
+    .eq("clinicId", clinicId)
+    .eq("patientId", patientId)
+    .eq("visitDate", date)
+    .order("createdAt", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (findErr) throw dbErr(`finding today's visit: ${findErr.message}`);
+  if (existing) return existing;
+
+  return createVisit(supabaseClient, { ...opts, visitDate: date });
+}
+
 async function updateVisit(supabaseClient, clinicId, visitId, patch) {
   const { data, error } = await supabaseClient
     .from("Visit")
@@ -135,4 +171,12 @@ async function createReadUrl(supabaseClient, path) {
   return data.signedUrl;
 }
 
-module.exports = { listVisitsForPatient, createVisit, updateVisit, createUploadUrl, addAttachment, createReadUrl };
+module.exports = {
+  listVisitsForPatient,
+  createVisit,
+  findOrCreateTodaysVisit,
+  updateVisit,
+  createUploadUrl,
+  addAttachment,
+  createReadUrl,
+};

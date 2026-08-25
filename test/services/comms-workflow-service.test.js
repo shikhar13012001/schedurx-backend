@@ -159,10 +159,10 @@ describe("buildDelayedReminderEntries", () => {
             channelsEnabled: ["whatsapp"],
             workflows: [
               {
-                id: "post-visit",
-                trigger: "post_appointment",
+                id: "review-request",
+                trigger: "review_request",
                 channel: "whatsapp",
-                offsetMinutes: 60,
+                offsetMinutes: 180,
                 enabled: true,
                 template: "...",
               },
@@ -171,9 +171,9 @@ describe("buildDelayedReminderEntries", () => {
         },
       });
       // Only 5 minutes of lead time — would skip a "reminder" trigger, but
-      // post_appointment isn't lead-time-sensitive (it fires after start).
+      // review_request isn't lead-time-sensitive (it fires after start).
       const entries = buildDelayedReminderEntries(clinic, "apt_1", Date.now() + 5 * 60_000);
-      assert.deepEqual(entries, [{ delta: 60, identifier: "apt_1::post-visit" }]);
+      assert.deepEqual(entries, [{ delta: 180, identifier: "apt_1::review-request" }]);
     });
   });
 });

@@ -58,6 +58,7 @@ function createApiV1QueueRouter(supabaseClient, twilioClient) {
         supabaseClient,
         { clinicId: req.staff.clinicId, doctorId, direction, targetId },
         req.log,
+        twilioClient,
       );
       return ok(res, result);
     } catch (err) {

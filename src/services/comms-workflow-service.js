@@ -23,14 +23,16 @@
 // clinicName into one string — kept so a template can reference "who and
 // where" as a single variable instead of two, for Meta's variable-density
 // review.
-// trigger is one of: booking_confirmed | reschedule | cancellation | no_show
-// (fire immediately, synchronously, the moment the action happens — a
-// no-show is always staff-confirmed, never auto-fired, so "immediate" here
-// just means "the moment a human confirms it") or
-// reminder | pre_appointment | post_appointment | review_request (fire later,
-// via a nettu-scheduler reminder — offsetMinutes is relative to the
-// appointment's start; positive = after start, so a "2h after it ends"
-// workflow on a 30-minute slot would use offsetMinutes: 150).
+// trigger is one of: booking_confirmed | reschedule | cancellation | no_show |
+// post_appointment (fire immediately, synchronously, the moment the action
+// happens — a no-show is always staff-confirmed, never auto-fired, so
+// "immediate" here just means "the moment a human confirms it";
+// post_appointment fires from appointmentSvc.markCompleted, the moment a
+// queue check-in is marked done — not "some fixed minutes after the
+// originally booked start," which has no reliable relationship to when the
+// visit actually happened) or reminder | pre_appointment | review_request
+// (fire later, via a nettu-scheduler reminder — offsetMinutes is relative
+// to the appointment's start; positive = after start).
 //
 // Delayed workflows ride the exact same nettu reminders-array mechanism
 // already proven for task reminders — no new scheduler. Their identifier is
@@ -46,8 +48,8 @@ const failedMessageSvc = require("./failed-message-service");
 const { renderTemplate } = require("../lib/template");
 const { formatHumanTime } = require("./availability-service");
 
-const IMMEDIATE_TRIGGERS = new Set(["booking_confirmed", "reschedule", "cancellation", "no_show"]);
-const DELAYED_TRIGGERS = new Set(["reminder", "pre_appointment", "post_appointment", "review_request"]);
+const IMMEDIATE_TRIGGERS = new Set(["booking_confirmed", "reschedule", "cancellation", "no_show", "post_appointment"]);
+const DELAYED_TRIGGERS = new Set(["reminder", "pre_appointment", "review_request"]);
 
 // wa.me deep link into this booking's own Thread (Phase 4's booking-ID fast
 // path in webhooks-twilio.js) — the {{textCommsUrl}} a workflow template can

@@ -171,9 +171,10 @@ async function updatePatientFields(supabase, patientId, patch) {
 // "today", "this week", or "everything from here on" alike. status filters
 // to one Appointment.status value (booked/tentative/cancelled/completed/
 // no_show/blocked) — omitted means no status filtering at all.
-async function listAppointmentsForClinic(supabase, clinicId, { date, dateFrom, dateTo, doctorId, status } = {}) {
+async function listAppointmentsForClinic(supabase, clinicId, { date, dateFrom, dateTo, doctorId, patientId, status } = {}) {
   let query = supabase.from("Appointment").select("*").eq("clinicId", clinicId);
   if (doctorId) query = query.eq("doctorId", doctorId);
+  if (patientId) query = query.eq("patientId", patientId);
   if (status) query = query.eq("status", status);
   if (date) {
     query = query.gte("timeslot", `${date}T00:00:00`).lt("timeslot", `${date}T23:59:59.999`);
@@ -239,7 +240,29 @@ async function listPatientsForClinic(supabase, clinicId) {
     .eq("clinicId", clinicId)
     .order("createdAt", { ascending: false });
   if (error) throw dbErr(`listing patients: ${error.message}`);
-  return data ?? [];
+  const patients = data ?? [];
+  if (!patients.length) return patients;
+
+  // A real per-patient visit count and most-recent visit date, not the
+  // always-zero/always-blank it was before this list ever fetched Visit
+  // rows at all. Grouped in JS (not a SQL join) — same posture as this
+  // codebase's other cross-table counts (e.g. listPossibleNoShows in
+  // queue-service.js) — one extra query, one small reduce, no fragile join
+  // to keep in sync with the schema.
+  const { data: visitRows, error: visitErr } = await supabase.from("Visit").select("patientId, visitDate").eq("clinicId", clinicId);
+  if (visitErr) throw dbErr(`counting visits: ${visitErr.message}`);
+  const countsByPatientId = new Map();
+  const lastVisitByPatientId = new Map();
+  for (const row of visitRows ?? []) {
+    countsByPatientId.set(row.patientId, (countsByPatientId.get(row.patientId) ?? 0) + 1);
+    const current = lastVisitByPatientId.get(row.patientId);
+    if (row.visitDate && (!current || row.visitDate > current)) lastVisitByPatientId.set(row.patientId, row.visitDate);
+  }
+  return patients.map((patient) => ({
+    ...patient,
+    visitsCount: countsByPatientId.get(patient.id) ?? 0,
+    lastVisitDate: lastVisitByPatientId.get(patient.id) ?? null,
+  }));
 }
 
 // Ranked trigram search via the search_patients() SQL function

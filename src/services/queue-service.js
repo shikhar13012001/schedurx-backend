@@ -145,7 +145,7 @@ async function setStatus(supabaseClient, id, patch) {
 }
 
 // direction: "next" | "prev" | "jumpTo" (jumpTo requires targetId)
-async function advance(supabaseClient, { clinicId, doctorId, direction, targetId }, log) {
+async function advance(supabaseClient, { clinicId, doctorId, direction, targetId }, log, twilioClient) {
   const now = new Date().toISOString();
   const current = await getCurrentInRoom(supabaseClient, clinicId, doctorId);
 
@@ -164,7 +164,7 @@ async function advance(supabaseClient, { clinicId, doctorId, direction, targetId
       // the queue on to the next patient.
       if (current.appointmentId) {
         try {
-          await appointmentSvc.markCompleted(supabaseClient, { appointmentId: current.appointmentId, clinicId }, log);
+          await appointmentSvc.markCompleted(supabaseClient, { appointmentId: current.appointmentId, clinicId }, log, twilioClient);
         } catch (err) {
           log?.warn({ err, appointmentId: current.appointmentId }, "[queueSvc] couldn't mark appointment completed");
         }
