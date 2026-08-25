@@ -54,7 +54,7 @@ function createApiV1Router({
   router.use("/doctors", createApiV1DoctorsRouter(supabaseClient));
   router.use("/queue", createApiV1QueueRouter(supabaseClient, twilioClient));
   router.use("/realtime-token", createApiV1RealtimeTokenRouter());
-  router.use("/visits", createApiV1VisitsRouter(supabaseClient, openaiClient));
+  router.use("/visits", createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient));
   router.use("/media", createApiV1MediaRouter(openaiClient));
   router.use("/clinic-settings", createApiV1ClinicSettingsRouter(supabaseClient));
   router.use("/threads", createApiV1ThreadsRouter(supabaseClient, twilioClient));

@@ -25,6 +25,7 @@
   "type": "commonjs",
   "dependencies": {
     "@ai-sdk/openai": "^4.0.42",
+    "@elevenlabs/elevenlabs-js": "^2.65.0",
     "@supabase/supabase-js": "^2.108.1",
     "ai": "^7.0.66",
     "cors": "^2.8.5",

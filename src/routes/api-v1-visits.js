@@ -3,8 +3,24 @@ const { ok, fail } = require("../lib/response-envelope");
 const visitSvc = require("../services/visit-service");
 const openaiSvc = require("../services/openai-service");
 
-function createApiV1VisitsRouter(supabaseClient, openaiClient) {
+function createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient) {
   const router = Router();
+
+  // GET /api/v1/visits/scribe-token — mints a 15-minute single-use
+  // ElevenLabs token so the browser can open its own real-time Scribe
+  // transcription session directly (see now-serving.tsx's ambient-capture
+  // mode). Mounted before "/:id" routes so "scribe-token" is never
+  // swallowed as an :id param.
+  router.get("/scribe-token", async (req, res) => {
+    if (!elevenLabsClient) return fail(res, 503, "TRANSCRIPTION_NOT_CONFIGURED", "Real-time transcription is not configured for this deployment");
+    try {
+      const token = await elevenLabsClient.mintRealtimeScribeToken();
+      return ok(res, { token });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:visits] scribe-token failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
 
   router.get("/", async (req, res) => {
     const { patientId } = req.query;
@@ -90,6 +106,26 @@ function createApiV1VisitsRouter(supabaseClient, openaiClient) {
       return ok(res, { visit, transcript: rawText });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:visits] recap failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
+  // POST /api/v1/visits/:id/suggest — live, doctor-facing decision-support
+  // prompt during ambient capture (see openai-service.js's suggestDuringConsult
+  // for the full scope/safety framing). Called periodically by the frontend
+  // as committed transcript segments accumulate, not on every keystroke.
+  // Doesn't write anything to the Visit — purely advisory, nothing persisted.
+  router.post("/:id/suggest", async (req, res) => {
+    if (!openaiClient) return fail(res, 503, "AI_NOT_CONFIGURED", "AI suggestions are not configured for this deployment");
+
+    const { transcript } = req.body ?? {};
+    if (!transcript?.trim()) return fail(res, 422, "MISSING_FIELDS", "transcript is required");
+
+    try {
+      const suggestion = await openaiSvc.suggestDuringConsult(openaiClient, transcript);
+      return ok(res, { suggestion });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:visits] suggest failed");
       return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
     }
   });

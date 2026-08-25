@@ -17,6 +17,31 @@ describe("generateVisitNote", () => {
   });
 });
 
+describe("suggestDuringConsult", () => {
+  test("returns the trimmed suggestion from a strict-JSON response", async () => {
+    const openaiClient = createOpenaiStub({ content: JSON.stringify({ suggestion: "  Consider asking about duration of symptoms.  " }) });
+    const suggestion = await openaiSvc.suggestDuringConsult(openaiClient, "Patient: I've had a cough for a while.");
+    assert.equal(suggestion, "Consider asking about duration of symptoms.");
+  });
+
+  test("returns null (not a string) when the model has nothing to suggest yet", async () => {
+    const openaiClient = createOpenaiStub({ content: JSON.stringify({ suggestion: null }) });
+    const suggestion = await openaiSvc.suggestDuringConsult(openaiClient, "Doctor: Hello, how are you today?");
+    assert.equal(suggestion, null);
+  });
+
+  test("returns null for an empty/whitespace-only suggestion instead of throwing", async () => {
+    const openaiClient = createOpenaiStub({ content: JSON.stringify({ suggestion: "   " }) });
+    const suggestion = await openaiSvc.suggestDuringConsult(openaiClient, "some transcript");
+    assert.equal(suggestion, null);
+  });
+
+  test("throws AI_RESPONSE_INVALID on an unparseable response", async () => {
+    const openaiClient = createOpenaiStub({ content: "not json" });
+    await assert.rejects(() => openaiSvc.suggestDuringConsult(openaiClient, "some transcript"), /AI_RESPONSE_INVALID|unparseable/);
+  });
+});
+
 describe("transcribeAudio", () => {
   test("returns the transcript text", async () => {
     const openaiClient = createOpenaiStub({ transcript: "Please reschedule my appointment to Friday." });
