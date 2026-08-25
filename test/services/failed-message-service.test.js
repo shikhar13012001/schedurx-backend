@@ -128,7 +128,7 @@ describe("processDue", () => {
     assert.equal(row.attempts, 3);
   });
 
-  test("exhaustion sends an alert email when an emailClient is provided", async () => {
+  test("exhaustion sends one alert email when an emailClient is provided", async () => {
     const supabaseClient = createTableStub({ FailedMessage: [dueRow({ attempts: 2, maxAttempts: 3, purpose: "booking_confirmed" })] });
     const twilioClient = {
       async sendSms() {
@@ -138,11 +138,39 @@ describe("processDue", () => {
     const alerts = [];
     const emailClient = { async sendAlert(opts) { alerts.push(opts); } };
 
-    await failedMessageSvc.processDue(supabaseClient, twilioClient, null, emailClient);
+    const result = await failedMessageSvc.processDue(supabaseClient, twilioClient, null, emailClient);
 
+    assert.equal(result.exhausted, 1);
     assert.equal(alerts.length, 1);
-    assert.match(alerts[0].subject, /booking_confirmed/);
+    assert.match(alerts[0].subject, /1 message exhausted retries/);
+    assert.match(alerts[0].text, /booking_confirmed/);
     assert.match(alerts[0].text, /\+919888888888/);
+  });
+
+  test("batches multiple rows exhausting in the same tick into ONE email, not one per row", async () => {
+    const supabaseClient = createTableStub({
+      FailedMessage: [
+        dueRow({ id: "fmsg_1", attempts: 2, maxAttempts: 3, purpose: "booking_confirmed", toPhone: "+919888888801" }),
+        dueRow({ id: "fmsg_2", attempts: 2, maxAttempts: 3, purpose: "reminder", toPhone: "+919888888802" }),
+      ],
+    });
+    const twilioClient = {
+      async sendSms() {
+        throw new Error("still failing");
+      },
+    };
+    const alerts = [];
+    const emailClient = { async sendAlert(opts) { alerts.push(opts); } };
+
+    const result = await failedMessageSvc.processDue(supabaseClient, twilioClient, null, emailClient);
+
+    assert.equal(result.exhausted, 2);
+    // The whole point: a burst of failures in one tick is ONE email
+    // summarizing both, not two separate emails landing at once.
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].subject, /2 messages exhausted retries/);
+    assert.match(alerts[0].text, /\+919888888801/);
+    assert.match(alerts[0].text, /\+919888888802/);
   });
 
   test("does not email when the retry still has attempts left (not yet exhausted)", async () => {

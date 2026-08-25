@@ -90,6 +90,15 @@ async function processDue(supabaseClient, twilioClient, log, emailClient) {
   }
 
   let attempted = 0;
+  // Collected across the whole tick and emailed as ONE summary at the end,
+  // not one email per row — a burst of failures (a real Twilio/network
+  // outage hitting several queued messages at once) would otherwise mean a
+  // flood of separate emails landing at exactly the moment a single clear
+  // signal matters most, which defeats the point of alerting in the first
+  // place. Worst case with this batching is one email per processDue tick
+  // (every 2 minutes — see server.js) summarizing everything that broke in
+  // that window.
+  const newlyExhausted = [];
   for (const row of due ?? []) {
     attempted++;
     try {
@@ -122,22 +131,38 @@ async function processDue(supabaseClient, twilioClient, log, emailClient) {
         })
         .eq("id", row.id);
       log?.warn({ err, id: row.id, purpose: row.purpose, attempts, exhausted }, "[failedMessageSvc] retry failed");
-      if (exhausted && emailClient) {
-        try {
-          await emailClient.sendAlert({
-            subject: `Message delivery exhausted (${row.purpose ?? row.channel})`,
-            text:
-              `A ${row.channel} message to ${row.toPhone} (purpose: ${row.purpose ?? "unknown"}, clinic: ${row.clinicId ?? "unknown"}) ` +
-              `failed all ${attempts} attempts and will not be retried again.\n\nLast error: ${err?.message ?? String(err)}\n\n` +
-              `FailedMessage id: ${row.id}`,
-          });
-        } catch (emailErr) {
-          log?.error({ err: emailErr, id: row.id }, "[failedMessageSvc] failed to send exhaustion alert email");
-        }
+      if (exhausted) {
+        newlyExhausted.push({
+          id: row.id,
+          channel: row.channel,
+          toPhone: row.toPhone,
+          purpose: row.purpose ?? "unknown",
+          clinicId: row.clinicId ?? "unknown",
+          attempts,
+          lastError: err?.message ?? String(err),
+        });
       }
     }
   }
-  return { attempted };
+
+  if (newlyExhausted.length > 0 && emailClient) {
+    try {
+      await emailClient.sendAlert({
+        subject: `${newlyExhausted.length} message${newlyExhausted.length > 1 ? "s" : ""} exhausted retries`,
+        text: newlyExhausted
+          .map(
+            (m) =>
+              `- ${m.channel} to ${m.toPhone} (purpose: ${m.purpose}, clinic: ${m.clinicId}, ${m.attempts} attempts)\n` +
+              `  Last error: ${m.lastError}\n  FailedMessage id: ${m.id}`,
+          )
+          .join("\n\n"),
+      });
+    } catch (emailErr) {
+      log?.error({ err: emailErr, count: newlyExhausted.length }, "[failedMessageSvc] failed to send batched exhaustion alert email");
+    }
+  }
+
+  return { attempted, exhausted: newlyExhausted.length };
 }
 
 module.exports = { isRetryableError, enqueue, processDue };
