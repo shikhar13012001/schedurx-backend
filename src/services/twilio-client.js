@@ -12,16 +12,30 @@ const twilio = require("twilio");
 // deliver" gets attached once, for free, everywhere. Both are optional:
 // without statusCallbackBaseUrl, Twilio has nowhere to report status to, and
 // sends still work exactly as before — this is additive, not a requirement.
-function createTwilioClient({ accountSid, authToken, smsFrom, whatsappFrom, statusCallbackBaseUrl, onMessageSent }) {
-  const client = twilio(accountSid, authToken);
+// sdkClient is an injection point for tests only — real callers never pass
+// it, so `twilio(accountSid, authToken)` is always what actually runs in
+// production. Without this, nothing could unit-test this file's own wire
+// format (the payload shape sent to Twilio, the statusCallback URL, the
+// onMessageSent field mapping) without a real network call — which is
+// exactly why the toPhone-vs-to field mismatch and the wrong
+// /status-callback route both shipped and were only caught by a live send.
+function createTwilioClient({ accountSid, authToken, smsFrom, whatsappFrom, statusCallbackBaseUrl, onMessageSent, sdkClient }) {
+  const client = sdkClient ?? twilio(accountSid, authToken);
   const statusCallback = statusCallbackBaseUrl ? `${statusCallbackBaseUrl}/webhooks/twilio/message-status` : undefined;
 
   // Fire-and-forget by design (see recordSent's own comment) — a MessageLog
   // write failing must never make the caller think the actual Twilio send
-  // failed, since it didn't.
+  // failed, since it didn't. The outer try/catch matters as much as the
+  // .catch() — onMessageSent throwing synchronously (not returning a
+  // rejected promise at all) would otherwise propagate straight out of
+  // this function and fail the send that already genuinely succeeded.
   function logSent(result, { channel, to, clinicId, purpose }) {
     if (!onMessageSent) return;
-    Promise.resolve(onMessageSent({ sid: result.sid, channel, toPhone: to, clinicId, purpose, initialStatus: result.status })).catch(() => {});
+    try {
+      Promise.resolve(onMessageSent({ sid: result.sid, channel, toPhone: to, clinicId, purpose, initialStatus: result.status })).catch(() => {});
+    } catch {
+      // Swallowed for the same reason as the .catch() above.
+    }
   }
 
   return {
