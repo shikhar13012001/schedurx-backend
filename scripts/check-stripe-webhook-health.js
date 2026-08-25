@@ -39,8 +39,8 @@ if (!process.env.STRIPE_SECRET_KEY) {
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const emailClient = createEmailClient({
-  gmailUser: process.env.ALERT_EMAIL_GMAIL_USER,
-  gmailAppPassword: process.env.ALERT_EMAIL_GMAIL_APP_PASSWORD,
+  apiKey: process.env.RESEND_API_KEY,
+  from: process.env.RESEND_FROM_EMAIL,
   alertTo: process.env.ALERT_EMAIL_TO,
 });
 
@@ -99,7 +99,7 @@ async function main() {
         console.error("[webhook-health] Failed to send alert email:", err);
       }
     } else {
-      console.log("[webhook-health] ALERT_EMAIL_GMAIL_USER/ALERT_EMAIL_GMAIL_APP_PASSWORD not configured — no alert email sent.");
+      console.log("[webhook-health] RESEND_API_KEY/ALERT_EMAIL_TO not configured — no alert email sent.");
     }
   }
   process.exit(healthy ? 0 : 1);

@@ -161,17 +161,18 @@ const schema = z.object({
   // (scripts/check-stripe-webhook-health.js) or a message exhausting its
   // retries (failed-message-service.js) sends one plain-text email here
   // instead of only ever sitting in journalctl/the database waiting for
-  // someone to happen to look. Gmail SMTP + an App Password (requires 2FA
-  // enabled on the account — myaccount.google.com/apppasswords), not a
-  // transactional email API, since this is low-volume (only fires on real
-  // failures) and needs zero new account signup. Left unset, alerts are
-  // still logged, just never emailed — same graceful-degrade posture as
-  // every other optional integration in this file.
-  ALERT_EMAIL_GMAIL_USER: z.string().email().optional(),
-  ALERT_EMAIL_GMAIL_APP_PASSWORD: z.string().optional(),
-  // Defaults to ALERT_EMAIL_GMAIL_USER itself (mail yourself) if unset —
-  // override only if alerts should go somewhere other than the sending
-  // account, e.g. a shared ops inbox.
+  // someone to happen to look. Resend's HTTP API (port 443), not SMTP —
+  // this droplet's cloud provider blocks outbound SMTP ports (465/587) at
+  // the network level by default (confirmed via a raw TCP test when Gmail
+  // SMTP was tried first), so an HTTP-based provider is what actually
+  // works here, not a preference. Left unset, alerts are still logged,
+  // just never emailed — same graceful-degrade posture as every other
+  // optional integration in this file.
+  RESEND_API_KEY: z.string().optional(),
+  // Resend's shared no-verification-needed sender if unset — fine for
+  // mailing the account's own registered address, which is this alert
+  // system's only use case.
+  RESEND_FROM_EMAIL: z.string().email().optional(),
   ALERT_EMAIL_TO: z.string().email().optional(),
 });
 

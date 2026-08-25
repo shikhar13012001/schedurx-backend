@@ -102,17 +102,13 @@ function buildAssistantModel() {
 }
 
 function buildEmailClient() {
-  if (!config.ALERT_EMAIL_GMAIL_USER || !config.ALERT_EMAIL_GMAIL_APP_PASSWORD) {
+  if (!config.RESEND_API_KEY || !config.ALERT_EMAIL_TO) {
     logger.warn("[startup] Alert email not configured — retry-exhaustion alerts will only be logged, not emailed");
     return null;
   }
   try {
     const { createEmailClient } = require("./services/email-service");
-    return createEmailClient({
-      gmailUser: config.ALERT_EMAIL_GMAIL_USER,
-      gmailAppPassword: config.ALERT_EMAIL_GMAIL_APP_PASSWORD,
-      alertTo: config.ALERT_EMAIL_TO,
-    });
+    return createEmailClient({ apiKey: config.RESEND_API_KEY, from: config.RESEND_FROM_EMAIL, alertTo: config.ALERT_EMAIL_TO });
   } catch (err) {
     logger.error({ err }, "[startup] Email client construction failed — retry-exhaustion alerts will only be logged");
     return null;
