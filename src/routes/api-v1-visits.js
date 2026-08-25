@@ -110,12 +110,14 @@ function createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient)
     }
   });
 
-  // POST /api/v1/visits/:id/suggest — live, doctor-facing decision-support
+  // POST /api/v1/visits/suggest — live, doctor-facing decision-support
   // prompt during ambient capture (see openai-service.js's suggestDuringConsult
   // for the full scope/safety framing). Called periodically by the frontend
   // as committed transcript segments accumulate, not on every keystroke.
-  // Doesn't write anything to the Visit — purely advisory, nothing persisted.
-  router.post("/:id/suggest", async (req, res) => {
+  // Not visit-scoped (no :id) — capture can start before a Visit row exists
+  // (that's only guaranteed lazily, at recap time) and this never writes
+  // anything to one anyway — purely advisory, nothing persisted.
+  router.post("/suggest", async (req, res) => {
     if (!openaiClient) return fail(res, 503, "AI_NOT_CONFIGURED", "AI suggestions are not configured for this deployment");
 
     const { transcript } = req.body ?? {};

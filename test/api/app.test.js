@@ -2053,7 +2053,7 @@ test("GET /api/v1/visits/scribe-token is unavailable without an ElevenLabs clien
   });
 });
 
-test("POST /api/v1/visits/:id/suggest returns a grounded suggestion and never writes to the Visit", async () => {
+test("POST /api/v1/visits/suggest returns a grounded suggestion and never writes to the Visit", async () => {
   const firebaseAdminApp = createFirebaseAdminStub({
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
   });
@@ -2065,7 +2065,7 @@ test("POST /api/v1/visits/:id/suggest returns a grounded suggestion and never wr
   const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient });
 
   await withServer(app, async ({ request }) => {
-    const response = await request("/api/v1/visits/visit_1/suggest", {
+    const response = await request("/api/v1/visits/suggest", {
       method: "POST",
       headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
       body: JSON.stringify({ transcript: "Patient: I've had a cough for a while." }),
@@ -2078,7 +2078,7 @@ test("POST /api/v1/visits/:id/suggest returns a grounded suggestion and never wr
   assert.equal(supabaseClient._tables.Visit[0].notes, null, "suggest must never write to the Visit — purely advisory");
 });
 
-test("POST /api/v1/visits/:id/suggest requires a non-empty transcript", async () => {
+test("POST /api/v1/visits/suggest requires a non-empty transcript", async () => {
   const firebaseAdminApp = createFirebaseAdminStub({
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
   });
@@ -2087,7 +2087,7 @@ test("POST /api/v1/visits/:id/suggest requires a non-empty transcript", async ()
   const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient });
 
   await withServer(app, async ({ request }) => {
-    const response = await request("/api/v1/visits/visit_1/suggest", {
+    const response = await request("/api/v1/visits/suggest", {
       method: "POST",
       headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
       body: JSON.stringify({ transcript: "   " }),
@@ -2096,7 +2096,7 @@ test("POST /api/v1/visits/:id/suggest requires a non-empty transcript", async ()
   });
 });
 
-test("POST /api/v1/visits/:id/suggest is unavailable without an OpenAI client", async () => {
+test("POST /api/v1/visits/suggest is unavailable without an OpenAI client", async () => {
   const firebaseAdminApp = createFirebaseAdminStub({
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
   });
@@ -2104,7 +2104,7 @@ test("POST /api/v1/visits/:id/suggest is unavailable without an OpenAI client", 
   const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
 
   await withServer(app, async ({ request }) => {
-    const response = await request("/api/v1/visits/visit_1/suggest", {
+    const response = await request("/api/v1/visits/suggest", {
       method: "POST",
       headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
       body: JSON.stringify({ transcript: "some transcript" }),
