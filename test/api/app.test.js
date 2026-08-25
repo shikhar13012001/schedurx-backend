@@ -1574,6 +1574,66 @@ test("GET /api/v1/wa-logs scopes strictly to the authenticated staff member's cl
   });
 });
 
+// ─── /api/v1/messaging/failures, /api/v1/messaging/retry-queue ────────────────
+
+test("GET /api/v1/messaging/failures scopes to the authenticated staff member's clinicId and only undelivered/failed rows", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const now = new Date().toISOString();
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    MessageLog: [
+      { id: "msglog_1", clinicId: "clinic-1", providerSid: "SM1", channel: "whatsapp", status: "undelivered", createdAt: now },
+      { id: "msglog_2", clinicId: "clinic-1", providerSid: "SM2", channel: "sms", status: "delivered", createdAt: now },
+      { id: "msglog_3", clinicId: "clinic-2", providerSid: "SM3", channel: "whatsapp", status: "failed", createdAt: now },
+    ],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/messaging/failures", { headers: { Authorization: "Bearer anything" } });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.data.failures.length, 1);
+    assert.equal(body.data.failures[0].id, "msglog_1");
+  });
+});
+
+test("GET /api/v1/messaging/retry-queue scopes to the clinic and excludes resolved rows by default", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const now = new Date().toISOString();
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    FailedMessage: [
+      { id: "fmsg_1", clinicId: "clinic-1", channel: "sms", toPhone: "+919888888888", status: "pending", createdAt: now },
+      { id: "fmsg_2", clinicId: "clinic-1", channel: "whatsapp", toPhone: "+919888888889", status: "exhausted", createdAt: now },
+      { id: "fmsg_3", clinicId: "clinic-1", channel: "sms", toPhone: "+919888888890", status: "resolved", createdAt: now },
+      { id: "fmsg_4", clinicId: "clinic-2", channel: "sms", toPhone: "+919888888891", status: "pending", createdAt: now },
+    ],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/messaging/retry-queue", { headers: { Authorization: "Bearer anything" } });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      body.data.queue.map((q) => q.id).sort(),
+      ["fmsg_1", "fmsg_2"],
+    );
+
+    const exhaustedOnly = await request("/api/v1/messaging/retry-queue?status=exhausted", { headers: { Authorization: "Bearer anything" } });
+    const exhaustedBody = await readJson(exhaustedOnly);
+    assert.equal(exhaustedBody.data.queue.length, 1);
+    assert.equal(exhaustedBody.data.queue[0].id, "fmsg_2");
+  });
+});
+
 test("POST /tools/call-logs requires bearer auth and creates a real row", async () => {
   const supabaseClient = createTableStub();
   const app = createApp({ supabaseClient, nettuClient: null });

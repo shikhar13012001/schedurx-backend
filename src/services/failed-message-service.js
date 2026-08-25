@@ -165,4 +165,16 @@ async function processDue(supabaseClient, twilioClient, log, emailClient) {
   return { attempted, exhausted: newlyExhausted.length };
 }
 
-module.exports = { isRetryableError, enqueue, processDue };
+// Staff-facing view (api-v1-messaging.js) — everything currently queued,
+// retrying, or that ran out of attempts for this clinic. 'resolved' rows
+// aren't included by default (nothing to act on); pass status explicitly
+// to see them anyway.
+async function listForClinic(supabaseClient, { clinicId, status, limit = 50 }) {
+  let query = supabaseClient.from("FailedMessage").select("*").eq("clinicId", clinicId).order("createdAt", { ascending: false }).limit(limit);
+  query = status ? query.eq("status", status) : query.neq("status", "resolved");
+  const { data, error } = await query;
+  if (error) throw Object.assign(new Error(`DB error listing failed messages: ${error.message}`), { code: "DATABASE_ERROR", statusCode: 500 });
+  return data ?? [];
+}
+
+module.exports = { isRetryableError, enqueue, processDue, listForClinic };
