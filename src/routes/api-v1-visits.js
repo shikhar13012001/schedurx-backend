@@ -35,9 +35,16 @@ function createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient)
     }
   });
 
+  // Idempotent by (clinicId, patientId, visitDate) — the caller (now-serving.tsx)
+  // only ever knows the patient's own list-view Patient row, which never
+  // carries a full `visits` array (that's a separate, more expensive fetch —
+  // see table-service.js's listPatientsForClinic), so it can't reliably
+  // tell client-side whether today's Visit already exists. Rather than have
+  // every caller guess and risk a duplicate row per recap, this always
+  // resolves to the same row for the same clinic/patient/day.
   router.post("/", async (req, res) => {
     try {
-      const visit = await visitSvc.createVisit(supabaseClient, { ...req.body, clinicId: req.staff.clinicId });
+      const visit = await visitSvc.findOrCreateTodaysVisit(supabaseClient, { ...req.body, clinicId: req.staff.clinicId });
       return res.status(201).json({ success: true, data: { visit }, message: null });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:visits] create failed");

@@ -1896,6 +1896,35 @@ test("GET /api/v1/analytics/practice-pulse returns real insights when configured
   });
 });
 
+// ─── POST /api/v1/visits (idempotent find-or-create) ───────────────────────────
+
+test("POST /api/v1/visits is idempotent — calling it twice for the same patient/day returns the same Visit, not a duplicate", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({ Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }] });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const body = { patientId: "pat_1", doctorId: "doc_1", symptoms: "Fever" };
+    const first = await request("/api/v1/visits", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const firstBody = await readJson(first);
+    const second = await request("/api/v1/visits", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const secondBody = await readJson(second);
+    assert.equal(firstBody.data.visit.id, secondBody.data.visit.id);
+  });
+
+  assert.equal(supabaseClient._tables.Visit.length, 1, "a second call for the same patient/day must not create a second row");
+});
+
 // ─── /api/v1/visits/:id/upload-url, /attachments ────────────────────────────────
 
 test("POST /api/v1/visits/:id/upload-url returns a signed upload URL scoped to clinic/visit", async () => {
