@@ -15,6 +15,11 @@ function createEmailClient({ gmailUser, gmailAppPassword, alertTo }) {
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: { user: gmailUser, pass: gmailAppPassword },
+    // The droplet has no IPv6 route, but Node's DNS resolution still
+    // returns Gmail's SMTP AAAA record first — without this, every send
+    // fails immediately with ENETUNREACH before ever reaching Gmail. Forces
+    // the underlying socket connect() to resolve IPv4 (A record) only.
+    family: 4,
   });
   const to = alertTo || gmailUser;
 
