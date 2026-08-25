@@ -46,16 +46,20 @@ function createTableStub(initialTables = {}) {
   function from(name) {
     if (!tables[name]) tables[name] = [];
     const filters = [];
-    let orderCol = null;
-    let orderAsc = true;
+    // Each .order() call adds one column, matching real PostgREST — a
+    // second call is an additional sort key (tiebreaker), not a replacement.
+    const orders = [];
     let limitN = null;
 
     function currentRows() {
       let rows = tables[name].filter((row) => matches(row, filters));
-      if (orderCol) {
+      if (orders.length) {
         rows = [...rows].sort((a, b) => {
-          const diff = a[orderCol] > b[orderCol] ? 1 : a[orderCol] < b[orderCol] ? -1 : 0;
-          return orderAsc ? diff : -diff;
+          for (const [col, ascending] of orders) {
+            const diff = a[col] > b[col] ? 1 : a[col] < b[col] ? -1 : 0;
+            if (diff !== 0) return ascending ? diff : -diff;
+          }
+          return 0;
         });
       }
       if (limitN != null) rows = rows.slice(0, limitN);
@@ -107,8 +111,7 @@ function createTableStub(initialTables = {}) {
         return this;
       },
       order(col, { ascending = true } = {}) {
-        orderCol = col;
-        orderAsc = ascending;
+        orders.push([col, ascending]);
         // Chainable like every other filter method (eq/gte/...), not
         // terminal — .limit()/.maybeSingle() can follow, same as real
         // supabase-js. Still awaitable bare via the builder's own .then()

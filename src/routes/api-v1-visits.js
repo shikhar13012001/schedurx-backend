@@ -110,6 +110,18 @@ function createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient)
 
       const note = await openaiSvc.generateVisitNote(openaiClient, rawText);
       const visit = await visitSvc.updateVisit(supabaseClient, req.staff.clinicId, req.params.id, { notes: note });
+
+      // Best-effort — keeps the actual recording so it can be played back
+      // from the patient's timeline later. Never blocks the recap itself.
+      if (audioBase64) {
+        try {
+          const contentType = filename?.endsWith(".mp4") ? "audio/mp4" : "audio/webm";
+          await visitSvc.saveAudioAttachment(supabaseClient, req.staff.clinicId, req.params.id, Buffer.from(audioBase64, "base64"), contentType);
+        } catch (err) {
+          req.log?.error({ err }, "[api-v1:visits] saving recap audio attachment failed");
+        }
+      }
+
       return ok(res, { visit, transcript: rawText });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:visits] recap failed");

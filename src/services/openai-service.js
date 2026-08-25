@@ -81,8 +81,11 @@ async function generateVisitNote(openaiClient, rawText) {
         role: "system",
         content:
           "You turn a doctor's short spoken or typed recap of a patient consult into a clean clinical note. " +
-          "Reply with strict JSON: {\"note\": \"<2-4 sentence clinical note, third person, factual, no invented " +
-          'details beyond what was said>"}.',
+          "Only state what the recap actually says — never fill gaps with plausible-sounding generic clinical " +
+          'language (e.g. do not write "advised on next steps" or "follow-up scheduled" unless the recap says ' +
+          "so). If the recap is too thin or vague to summarize meaningfully, say that plainly rather than " +
+          "producing a generic-sounding note. Reply with strict JSON: {\"note\": \"<2-4 sentence clinical note, " +
+          'third person, factual, no invented details beyond what was said>"}.',
       },
       { role: "user", content: rawText },
     ],

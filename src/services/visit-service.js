@@ -8,12 +8,18 @@ function dbErr(msg) {
 }
 
 async function listVisitsForPatient(supabaseClient, clinicId, patientId) {
+  // visitDate is day-granularity only, so a patient with more than one Visit
+  // on the same day (common during testing, but also a real possibility —
+  // e.g. two same-day walk-ins) would otherwise come back in arbitrary DB
+  // order. createdAt as a tiebreaker keeps same-day visits in the order they
+  // actually happened.
   const { data, error } = await supabaseClient
     .from("Visit")
     .select("*")
     .eq("clinicId", clinicId)
     .eq("patientId", patientId)
-    .order("visitDate", { ascending: false });
+    .order("visitDate", { ascending: false })
+    .order("createdAt", { ascending: false });
   if (error) throw dbErr(`listing visits: ${error.message}`);
   return data ?? [];
 }
@@ -133,8 +139,8 @@ async function createUploadUrl(supabaseClient, clinicId, visitId, { fileName, co
 // Called after a successful direct-to-storage upload — appends the attachment
 // to Visit.rxAttachments (a private bucket path, never a public URL).
 async function addAttachment(supabaseClient, clinicId, visitId, { path, type }) {
-  if (!path || !["photo", "digital"].includes(type)) {
-    throw Object.assign(new Error("path and a valid type ('photo'|'digital') are required"), {
+  if (!path || !["photo", "digital", "audio"].includes(type)) {
+    throw Object.assign(new Error("path and a valid type ('photo'|'digital'|'audio') are required"), {
       code: "MISSING_FIELDS",
       statusCode: 422,
     });
@@ -164,6 +170,21 @@ async function addAttachment(supabaseClient, clinicId, visitId, { path, type }) 
   return data;
 }
 
+// Persists the raw recording behind a recap so it can be played back later
+// (the "Recap" flow already has the audio bytes server-side, since they
+// arrive as audioBase64 for Whisper transcription — this just keeps them
+// instead of discarding them once the transcript is extracted). Direct
+// buffer upload, not the signed-URL round trip the browser uses, since the
+// bytes are already here.
+async function saveAudioAttachment(supabaseClient, clinicId, visitId, buffer, contentType) {
+  const path = `${clinicId}/${visitId}/${Date.now()}-recap.webm`;
+  const { error: uploadErr } = await supabaseClient.storage
+    .from(RX_BUCKET)
+    .upload(path, buffer, { contentType: contentType ?? "audio/webm" });
+  if (uploadErr) throw dbErr(`uploading audio attachment: ${uploadErr.message}`);
+  return addAttachment(supabaseClient, clinicId, visitId, { path, type: "audio" });
+}
+
 // Short-lived read URL for a private-bucket attachment path.
 async function createReadUrl(supabaseClient, path) {
   const { data, error } = await supabaseClient.storage.from(RX_BUCKET).createSignedUrl(path, 60 * 10);
@@ -178,5 +199,6 @@ module.exports = {
   updateVisit,
   createUploadUrl,
   addAttachment,
+  saveAudioAttachment,
   createReadUrl,
 };
