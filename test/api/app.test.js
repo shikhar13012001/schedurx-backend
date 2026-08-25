@@ -2024,6 +2024,83 @@ test("POST /api/v1/visits/:id/recap turns a typed recap into a structured note a
   });
 });
 
+test("POST /api/v1/visits/:id/recap saves the recording as an audio attachment when audioBase64 is given", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Visit: [{ id: "visit_1", clinicId: "clinic-1", patientId: "pat_1", notes: null, rxAttachments: [] }],
+  });
+  // The recap route talks to Storage directly (server already has the audio
+  // bytes, no signed-upload round trip needed) — a minimal inline stub since
+  // no shared Storage stub exists yet.
+  const uploadedPaths = [];
+  supabaseClient.storage = {
+    from: () => ({
+      async upload(path) {
+        uploadedPaths.push(path);
+        return { data: { path }, error: null };
+      },
+    }),
+  };
+  const openaiClient = createOpenaiStub({
+    content: JSON.stringify({ note: "Patient presented with mild fever; advised rest and paracetamol." }),
+    transcript: "mild fever, told them to rest and take paracetamol",
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/visits/visit_1/recap", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ audioBase64: Buffer.from("fake audio bytes").toString("base64"), filename: "clip.webm" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200, JSON.stringify(body));
+  });
+
+  assert.equal(uploadedPaths.length, 1);
+  const visit = supabaseClient._tables.Visit.find((v) => v.id === "visit_1");
+  assert.deepEqual(
+    visit.rxAttachments.map((a) => a.type),
+    ["audio"]
+  );
+});
+
+test("POST /api/v1/visits/:id/recap still saves the note even when persisting the audio attachment fails", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Visit: [{ id: "visit_1", clinicId: "clinic-1", patientId: "pat_1", notes: null, rxAttachments: [] }],
+  });
+  supabaseClient.storage = {
+    from: () => ({
+      async upload() {
+        return { data: null, error: { message: "storage is down" } };
+      },
+    }),
+  };
+  const openaiClient = createOpenaiStub({
+    content: JSON.stringify({ note: "Patient presented with mild fever; advised rest and paracetamol." }),
+    transcript: "mild fever, told them to rest and take paracetamol",
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/visits/visit_1/recap", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ audioBase64: Buffer.from("fake audio bytes").toString("base64"), filename: "clip.webm" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.data.visit.notes, "Patient presented with mild fever; advised rest and paracetamol.");
+  });
+});
+
 test("POST /api/v1/visits/:id/recap is unavailable without an OpenAI client", async () => {
   const firebaseAdminApp = createFirebaseAdminStub({
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },

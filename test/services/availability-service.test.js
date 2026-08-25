@@ -167,6 +167,24 @@ describe("getAvailableSlots", () => {
     assert.equal(slots.length, 0);
   });
 
+  // Regression test: requesting a single date="today" was being rejected as
+  // OUTSIDE_BOOKING_WINDOW for the rest of every day, while "tomorrow" (or
+  // any later date) worked fine — a bare "YYYY-MM-DD" parses as UTC
+  // midnight, i.e. the *start* of that day, so once any real time had
+  // elapsed since then, "today" always looked like it was already in the
+  // past relative to "now + minNotice".
+  test("does not reject date=today, even well after midnight", async () => {
+    const today = toDateString(new Date());
+
+    const { slots } = await getAvailableSlots(makeNettu([]), makeSupabase(), {
+      clinicId: "poc-clinic-001",
+      doctorId: "doc-priya-001",
+      date: today,
+    });
+
+    assert.deepEqual(slots, []);
+  });
+
   test("throws OUTSIDE_BOOKING_WINDOW for a date too far in the future", async () => {
     const farFuture = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 

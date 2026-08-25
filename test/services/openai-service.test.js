@@ -13,7 +13,16 @@ describe("generateVisitNote", () => {
 
   test("throws AI_RESPONSE_INVALID on an unparseable response", async () => {
     const openaiClient = createOpenaiStub({ content: "not json" });
-    await assert.rejects(() => openaiSvc.generateVisitNote(openaiClient, "some recap"), /AI_RESPONSE_INVALID|unparseable/);
+    await assert.rejects(
+      () => openaiSvc.generateVisitNote(openaiClient, "doctor gave a recap about the visit today"),
+      /AI_RESPONSE_INVALID|unparseable/
+    );
+  });
+
+  test("refuses locally, without ever calling the model, when the recap is too thin to summarize", async () => {
+    const openaiClient = createOpenaiStub({ content: JSON.stringify({ note: "should never be reached" }) });
+    const note = await openaiSvc.generateVisitNote(openaiClient, "ok yeah");
+    assert.match(note, /too brief/);
   });
 });
 

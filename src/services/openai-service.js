@@ -6,11 +6,12 @@
 const { toFile } = require("openai");
 const { config } = require("../config");
 
-async function chatCompletion(openaiClient, { messages, responseFormat }) {
+async function chatCompletion(openaiClient, { messages, responseFormat, temperature }) {
   const completion = await openaiClient.chat.completions.create({
     model: config.OPENAI_MODEL,
     messages,
     ...(responseFormat ? { response_format: responseFormat } : {}),
+    ...(temperature != null ? { temperature } : {}),
   });
   return completion.choices[0]?.message?.content ?? "";
 }
@@ -71,25 +72,50 @@ async function generatePracticePulse(openaiClient, statsSummary) {
   }
 }
 
+// Below this word count, the transcript is too thin for a note to mean
+// anything — refuse locally rather than let the model try. This caught a
+// real incident: a near-empty/garbled transcript still produced a full,
+// specific, entirely fabricated note ("30-year-old male... intermittent
+// chest pain and shortness of breath... cardiac workup recommended") that
+// the doctor never said. A short prompt instruction alone didn't stop it —
+// asked to "write a clinical note," the model defaults to writing a
+// plausible one even from noise. Refusing before the call ever happens is
+// the only guarantee; the prompt below is defense in depth for transcripts
+// that pass this bar but are still vague.
+const MIN_RECAP_WORDS = 4;
+
+function isTooThinToSummarize(rawText) {
+  return rawText.trim().split(/\s+/).filter(Boolean).length < MIN_RECAP_WORDS;
+}
+
 // Turns a short recorded/typed recap into a structured clinical note — the
 // same primitive backs both the manual "Recap" flow and ambient capture
 // (visits-recap.js's route decides which one triggered it, this doesn't care).
 async function generateVisitNote(openaiClient, rawText) {
+  if (isTooThinToSummarize(rawText)) {
+    return "Recap was too brief to summarize — please re-record with more detail.";
+  }
+
   const raw = await chatCompletion(openaiClient, {
     messages: [
       {
         role: "system",
         content:
           "You turn a doctor's short spoken or typed recap of a patient consult into a clean clinical note. " +
-          "Only state what the recap actually says — never fill gaps with plausible-sounding generic clinical " +
-          'language (e.g. do not write "advised on next steps" or "follow-up scheduled" unless the recap says ' +
-          "so). If the recap is too thin or vague to summarize meaningfully, say that plainly rather than " +
-          "producing a generic-sounding note. Reply with strict JSON: {\"note\": \"<2-4 sentence clinical note, " +
-          'third person, factual, no invented details beyond what was said>"}.',
+          "The recap text is your ONLY source of truth — treat it like a sworn transcript, not a prompt to " +
+          "imagine a plausible consult around. Every clinical detail in your note — age, gender, symptoms, " +
+          "duration, vitals, exam findings, diagnosis, medications, follow-up — must be explicitly present in " +
+          "the recap text. Do not add a single detail a real doctor would typically mention or that would " +
+          "typically accompany the stated complaint (e.g. never write \"vital signs are stable\" or \"no " +
+          "abnormal findings on auscultation\" or invent an age/gender unless the recap literally states it). " +
+          "If the recap is too thin, garbled, or off-topic to support a real clinical note, your note must say " +
+          'exactly that instead of writing anything clinical. Reply with strict JSON: {"note": "<2-4 sentence ' +
+          'clinical note, third person, using only facts stated in the recap>"}.',
       },
       { role: "user", content: rawText },
     ],
     responseFormat: { type: "json_object" },
+    temperature: 0,
   });
 
   try {

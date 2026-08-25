@@ -114,9 +114,17 @@ function resolveBookingWindow(opts, clinicRules) {
     throw Object.assign(new Error("Invalid date or dateRange provided"), { code: "INVALID_DATE", statusCode: 400 });
   }
 
-  // Reject requests entirely outside the booking window.
+  // Reject requests entirely outside the booking window. requestedEnd must
+  // be the END of that calendar day, not its start — a bare "YYYY-MM-DD"
+  // parses as UTC midnight (the very beginning of the day), so comparing
+  // that against "earliest" broke same-day requests for the rest of every
+  // day: once any time had passed since ~00:00 UTC (~5:30am IST), "today"
+  // as requestedEnd already looked like it was in the past relative to
+  // "now + minNotice", so every "book for today" request was rejected as
+  // outside the window while "tomorrow" (still comfortably in the future
+  // even at UTC midnight) worked fine.
   const requestedStart = new Date(startDate);
-  const requestedEnd = new Date(endDate);
+  const requestedEnd = new Date(`${endDate}T23:59:59.999Z`);
 
   if (requestedEnd < earliest) {
     throw Object.assign(new Error("Requested date range is outside the minimum notice period"), {
