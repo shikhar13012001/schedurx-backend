@@ -85,6 +85,14 @@ const DEFAULT_COMMUNICATION_WORKFLOWS = [
     id: "missed-call-sms", channel: "sms", enabled: true, trigger: "missed_call_followup", offsetMinutes: 0,
     template: "Sorry we missed your call at {{clinicName}}! Book an appointment here: {{bookingUrl}}, or call us back at {{clinicPhone}}.",
   },
+  // SMS-only for now — no Meta-approved WhatsApp Content Template exists yet
+  // for a no-show nudge (see the check-in plan's rollout phase 4). Add a
+  // "no-show-wa" entry alongside this once one's approved; nothing else
+  // about the no_show trigger needs to change to pick it up.
+  {
+    id: "no-show-sms", channel: "sms", enabled: true, trigger: "no_show", offsetMinutes: 0,
+    template: "Hi {{patientName}}, we missed you for your {{apptTime}} appointment with {{doctorName}} at {{clinicName}}. Reply to reschedule, or call us at {{clinicPhone}}.",
+  },
 ];
 
 const DEFAULT_SETTINGS = {

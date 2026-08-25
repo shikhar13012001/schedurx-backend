@@ -1634,6 +1634,115 @@ test("GET /api/v1/messaging/retry-queue scopes to the clinic and excludes resolv
   });
 });
 
+// ─── /api/v1/queue — check-in + no-show ────────────────────────────────────
+
+test("GET /api/v1/queue bundles the active queue with possible-no-show candidates, both scoped to the clinic", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic" }],
+    QueueItem: [{ id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", status: "waiting", position: 1 }],
+    Appointment: [
+      {
+        id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked",
+        timeslot: new Date(Date.now() - 60 * 60_000).toISOString(), // 1h ago — past default grace
+      },
+      {
+        id: "apt_2", clinicId: "clinic-2", doctorId: "doc-2", patientId: "pat-2", status: "booked",
+        timeslot: new Date(Date.now() - 60 * 60_000).toISOString(), // different clinic — must not leak in
+      },
+    ],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/queue", { headers: { Authorization: "Bearer anything" } });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.data.queue.length, 1);
+    assert.equal(body.data.queue[0].id, "q_1");
+    assert.deepEqual(body.data.possibleNoShows.map((a) => a.id), ["apt_1"]);
+  });
+});
+
+test("POST /api/v1/queue/walk-in with an appointmentId checks the booking in — not tagged as a walk-in", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/queue/walk-in", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ appointmentId: "apt_1" }),
+    });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 201);
+    assert.equal(body.data.queueItem.walkIn, false);
+    assert.equal(body.data.queueItem.doctorId, "doc-1");
+    assert.equal(body.data.queueItem.patientId, "pat-1");
+  });
+});
+
+test("POST /api/v1/queue/confirm-no-show marks the appointment no_show and scopes to the caller's clinic", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", settings: { communication: { channelsEnabled: [], workflows: [] } } }],
+    Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul", contactNumber: "+919888888888" }],
+    Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked", auditHistory: [] }],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/queue/confirm-no-show", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ appointmentId: "apt_1" }),
+    });
+    const body = await readJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.data.status, "no_show");
+    assert.equal(supabaseClient._tables.Appointment[0].status, "no_show");
+    assert.equal(supabaseClient._tables.Notification[0].clinicId, "clinic-1");
+  });
+
+  // Cross-clinic: a different clinic's staff can't no-show someone else's appointment.
+  const otherFirebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-2", role: "doctor", clinicId: "clinic-2" },
+  });
+  const otherApp = createApp({
+    supabaseClient: createTableStub({
+      Staff: [{ id: "staff-2", firebaseUid: "staff-2", clinicId: "clinic-2" }],
+      Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked", auditHistory: [] }],
+    }),
+    nettuClient: null,
+    firebaseAdminApp: otherFirebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
+  await withServer(otherApp, async ({ request }) => {
+    const response = await request("/api/v1/queue/confirm-no-show", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ appointmentId: "apt_1" }),
+    });
+    assert.equal(response.status, 404);
+  });
+});
+
 test("POST /tools/call-logs requires bearer auth and creates a real row", async () => {
   const supabaseClient = createTableStub();
   const app = createApp({ supabaseClient, nettuClient: null });

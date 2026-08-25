@@ -52,7 +52,7 @@ function createApiV1Router({
   router.use("/patients", createApiV1PatientsRouter(supabaseClient));
   router.use("/team", createApiV1TeamRouter(supabaseClient, twilioClient));
   router.use("/doctors", createApiV1DoctorsRouter(supabaseClient));
-  router.use("/queue", createApiV1QueueRouter(supabaseClient));
+  router.use("/queue", createApiV1QueueRouter(supabaseClient, twilioClient));
   router.use("/realtime-token", createApiV1RealtimeTokenRouter());
   router.use("/visits", createApiV1VisitsRouter(supabaseClient, openaiClient));
   router.use("/media", createApiV1MediaRouter(openaiClient));

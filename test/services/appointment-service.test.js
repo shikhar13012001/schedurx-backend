@@ -1,7 +1,14 @@
 const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 
-const { bookAppointment, rescheduleAppointment, cancelAppointment } = require("../../src/services/appointment-service");
+const {
+  bookAppointment,
+  rescheduleAppointment,
+  cancelAppointment,
+  markCompleted,
+  revertCompleted,
+  markNoShow,
+} = require("../../src/services/appointment-service");
 const { createTableStub } = require("../helpers/supabase-table-stub");
 const { createTwilioStub } = require("../helpers/twilio-stub");
 
@@ -440,5 +447,156 @@ describe("cancelAppointment", () => {
         return true;
       },
     );
+  });
+});
+
+describe("markCompleted / revertCompleted", () => {
+  function seed(overrides = {}) {
+    return createTableStub({
+      Appointment: [
+        { id: "apt_1", clinicId: "clinic-1", status: "booked", auditHistory: [], ...overrides },
+      ],
+    });
+  }
+
+  test("flips a booked appointment to completed with an audit entry", async () => {
+    const supabaseClient = seed();
+    const result = await markCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" });
+    assert.equal(result.status, "completed");
+    const row = supabaseClient._tables.Appointment[0];
+    assert.equal(row.status, "completed");
+    assert.equal(row.auditHistory.at(-1).action, "completed");
+  });
+
+  test("is idempotent — completing an already-completed appointment doesn't error or double the audit trail", async () => {
+    const supabaseClient = seed({ status: "completed", auditHistory: [{ action: "completed" }] });
+    const result = await markCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" });
+    assert.equal(result.status, "completed");
+    assert.equal(supabaseClient._tables.Appointment[0].auditHistory.length, 1);
+  });
+
+  test("throws APPOINTMENT_NOT_FOUND when clinicId mismatches", async () => {
+    const supabaseClient = seed({ clinicId: "other-clinic" });
+    await assert.rejects(
+      () => markCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }),
+      (err) => { assert.equal(err.code, "APPOINTMENT_NOT_FOUND"); return true; },
+    );
+  });
+
+  test("revertCompleted flips a completed appointment back to booked", async () => {
+    const supabaseClient = seed({ status: "completed" });
+    await revertCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" });
+    assert.equal(supabaseClient._tables.Appointment[0].status, "booked");
+  });
+
+  test("revertCompleted is a no-op (never throws) when the appointment isn't currently completed", async () => {
+    const supabaseClient = seed({ status: "booked" });
+    await revertCompleted(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" });
+    assert.equal(supabaseClient._tables.Appointment[0].status, "booked");
+  });
+
+  test("revertCompleted never throws even for an unknown appointmentId", async () => {
+    const supabaseClient = seed();
+    await assert.doesNotReject(() => revertCompleted(supabaseClient, { appointmentId: "nope", clinicId: "clinic-1" }));
+  });
+});
+
+describe("markNoShow", () => {
+  function seedClinic(overrides = {}) {
+    return {
+      id: "clinic-1",
+      status: "active",
+      name: "Nirmaya Clinic",
+      phone: "+919999999999",
+      timezone: "Asia/Kolkata",
+      openingHour: 9,
+      closingHour: 18,
+      settings: {
+        communication: {
+          channelsEnabled: ["sms"],
+          workflows: [
+            {
+              id: "no-show-sms",
+              trigger: "no_show",
+              channel: "sms",
+              enabled: true,
+              template: "Hi {{patientName}}, we missed you for your {{apptTime}} appointment with {{doctorName}} at {{clinicName}}.",
+            },
+          ],
+        },
+      },
+      ...overrides,
+    };
+  }
+
+  function seed({ apptOverrides = {}, clinicOverrides = {} } = {}) {
+    return createTableStub({
+      Clinic: [seedClinic(clinicOverrides)],
+      Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
+      Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul", contactNumber: "+919888888888" }],
+      Appointment: [
+        {
+          id: "apt_1",
+          clinicId: "clinic-1",
+          doctorId: "doc-1",
+          patientId: "pat-1",
+          timeslot: new Date(Date.now() - 30 * 60_000).toISOString(),
+          status: "booked",
+          auditHistory: [],
+          ...apptOverrides,
+        },
+      ],
+    });
+  }
+
+  test("flips a booked appointment to no_show, records an audit entry, and returns notification-worthy fields", async () => {
+    const supabaseClient = seed();
+    const twilioClient = createTwilioStub();
+    const result = await markNoShow(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, twilioClient);
+
+    assert.equal(result.status, "no_show");
+    assert.equal(result.patientName, "Rahul");
+    assert.equal(result.doctorName, "Dr. Priya");
+    assert.ok(result.apptTime);
+    const row = supabaseClient._tables.Appointment[0];
+    assert.equal(row.status, "no_show");
+    assert.equal(row.auditHistory.at(-1).action, "no_show");
+  });
+
+  test("fires the clinic's configured no_show workflow", async () => {
+    const supabaseClient = seed();
+    const twilioClient = createTwilioStub();
+    await markNoShow(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, twilioClient);
+
+    assert.equal(twilioClient.calls.sendSms.length, 1);
+    assert.equal(twilioClient.calls.sendSms[0].to, "+919888888888");
+    assert.match(twilioClient.calls.sendSms[0].body, /Hi Rahul, we missed you/);
+  });
+
+  test("throws APPOINTMENT_NOT_BOOKED when the appointment isn't currently booked", async () => {
+    const supabaseClient = seed({ apptOverrides: { status: "cancelled" } });
+    await assert.rejects(
+      () => markNoShow(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, createTwilioStub()),
+      (err) => { assert.equal(err.code, "APPOINTMENT_NOT_BOOKED"); return true; },
+    );
+  });
+
+  test("throws APPOINTMENT_NOT_FOUND when clinicId mismatches", async () => {
+    const supabaseClient = seed({ apptOverrides: { clinicId: "other-clinic" } });
+    await assert.rejects(
+      () => markNoShow(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, createTwilioStub()),
+      (err) => { assert.equal(err.code, "APPOINTMENT_NOT_FOUND"); return true; },
+    );
+  });
+
+  test("a messaging failure doesn't undo or fail the no-show confirmation itself", async () => {
+    const supabaseClient = seed();
+    const throwingTwilio = {
+      sendSms: async () => { throw new Error("Twilio is down"); },
+      sendWhatsApp: async () => { throw new Error("Twilio is down"); },
+    };
+    const result = await markNoShow(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, throwingTwilio);
+    assert.equal(result.status, "no_show");
+    assert.equal(supabaseClient._tables.Appointment[0].status, "no_show");
   });
 });

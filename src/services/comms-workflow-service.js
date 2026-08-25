@@ -23,8 +23,10 @@
 // clinicName into one string — kept so a template can reference "who and
 // where" as a single variable instead of two, for Meta's variable-density
 // review.
-// trigger is one of: booking_confirmed | reschedule | cancellation (fire
-// immediately, synchronously, the moment the action happens) or
+// trigger is one of: booking_confirmed | reschedule | cancellation | no_show
+// (fire immediately, synchronously, the moment the action happens — a
+// no-show is always staff-confirmed, never auto-fired, so "immediate" here
+// just means "the moment a human confirms it") or
 // reminder | pre_appointment | post_appointment | review_request (fire later,
 // via a nettu-scheduler reminder — offsetMinutes is relative to the
 // appointment's start; positive = after start, so a "2h after it ends"
@@ -44,7 +46,7 @@ const failedMessageSvc = require("./failed-message-service");
 const { renderTemplate } = require("../lib/template");
 const { formatHumanTime } = require("./availability-service");
 
-const IMMEDIATE_TRIGGERS = new Set(["booking_confirmed", "reschedule", "cancellation"]);
+const IMMEDIATE_TRIGGERS = new Set(["booking_confirmed", "reschedule", "cancellation", "no_show"]);
 const DELAYED_TRIGGERS = new Set(["reminder", "pre_appointment", "post_appointment", "review_request"]);
 
 // wa.me deep link into this booking's own Thread (Phase 4's booking-ID fast

@@ -893,6 +893,162 @@ async function cancelAppointment(nettuClient, supabaseClient, opts, log, twilioC
   };
 }
 
+// ─── Check-in lifecycle: completed / no-show ───────────────────────────────
+// Neither touches nettu-scheduler — the calendar slot itself isn't released
+// on a no-show (see the check-in plan's "not this round" scope). These only
+// move the Appointment row's own status (+ audit trail), plus a no-show's
+// best-effort patient-facing nudge.
+
+async function markCompleted(supabaseClient, { appointmentId, clinicId }, log) {
+  const { data: appt, error: fetchErr } = await supabaseClient
+    .from("Appointment")
+    .select("id, clinicId, status, auditHistory")
+    .eq("id", appointmentId)
+    .maybeSingle();
+  if (fetchErr)
+    throw Object.assign(new Error(`DB error: ${fetchErr.message}`), { code: "DATABASE_ERROR", statusCode: 500 });
+  if (!appt || appt.clinicId !== clinicId) {
+    throw Object.assign(new Error(`Appointment '${appointmentId}' not found`), {
+      code: "APPOINTMENT_NOT_FOUND",
+      statusCode: 404,
+    });
+  }
+  // Idempotent — advancing the queue past someone already marked complete
+  // (e.g. a double "next" click racing itself) shouldn't error.
+  if (appt.status === "completed") return { appointmentId, status: "completed" };
+
+  const currentHistory = Array.isArray(appt.auditHistory) ? appt.auditHistory : [];
+  const { error: updateErr } = await supabaseClient
+    .from("Appointment")
+    .update({
+      status: "completed",
+      auditHistory: [...currentHistory, buildAuditEntry("completed", {})],
+      updatedAt: new Date().toISOString(),
+    })
+    .eq("id", appointmentId);
+  if (updateErr) {
+    log?.error({ err: updateErr, appointmentId }, "[appointmentSvc] DB update failed after completing appointment");
+    throw Object.assign(new Error("Database error completing appointment"), {
+      code: "DATABASE_ERROR",
+      statusCode: 500,
+    });
+  }
+  return { appointmentId, status: "completed" };
+}
+
+// Reverses markCompleted — called when the queue's "prev" direction
+// resurrects a done entry, so the two states can't drift out of sync.
+// Best-effort: never throws, since undoing a queue step shouldn't fail just
+// because its appointment link turned out stale.
+async function revertCompleted(supabaseClient, { appointmentId, clinicId }, log) {
+  try {
+    const { data: appt } = await supabaseClient
+      .from("Appointment")
+      .select("id, clinicId, status")
+      .eq("id", appointmentId)
+      .maybeSingle();
+    if (!appt || appt.clinicId !== clinicId || appt.status !== "completed") return;
+    await supabaseClient.from("Appointment").update({ status: "booked", updatedAt: new Date().toISOString() }).eq("id", appointmentId);
+  } catch (err) {
+    log?.warn({ err, appointmentId }, "[appointmentSvc] couldn't revert completed status");
+  }
+}
+
+// Staff-confirmed only (see webhooks-nettu.js/comms-workflow-service.js for
+// the reminder side of "give them every reason to show up" — this is what
+// happens when they still don't). Never auto-fires from a background sweep;
+// the caller (api-v1-queue.js) only ever reaches this from an explicit
+// staff tap, matching the check-in plan's "a person confirms it" scope.
+async function markNoShow(supabaseClient, { appointmentId, clinicId }, log, twilioClient) {
+  const { data: appt, error: fetchErr } = await supabaseClient
+    .from("Appointment")
+    .select("id, clinicId, doctorId, patientId, timeslot, status, auditHistory")
+    .eq("id", appointmentId)
+    .maybeSingle();
+  if (fetchErr)
+    throw Object.assign(new Error(`DB error: ${fetchErr.message}`), { code: "DATABASE_ERROR", statusCode: 500 });
+  if (!appt || appt.clinicId !== clinicId) {
+    throw Object.assign(new Error(`Appointment '${appointmentId}' not found`), {
+      code: "APPOINTMENT_NOT_FOUND",
+      statusCode: 404,
+    });
+  }
+  if (appt.status !== "booked") {
+    throw Object.assign(new Error(`Appointment is '${appt.status}', not 'booked' — can't mark it a no-show`), {
+      code: "APPOINTMENT_NOT_BOOKED",
+      statusCode: 422,
+    });
+  }
+
+  const currentHistory = Array.isArray(appt.auditHistory) ? appt.auditHistory : [];
+  const { error: updateErr } = await supabaseClient
+    .from("Appointment")
+    .update({
+      status: "no_show",
+      auditHistory: [...currentHistory, buildAuditEntry("no_show", {})],
+      updatedAt: new Date().toISOString(),
+    })
+    .eq("id", appointmentId);
+  if (updateErr) {
+    log?.error({ err: updateErr, appointmentId }, "[appointmentSvc] DB update failed marking no-show");
+    throw Object.assign(new Error("Database error marking no-show"), { code: "DATABASE_ERROR", statusCode: 500 });
+  }
+  log?.info({ appointmentId, clinicId }, "[appointmentSvc] appointment marked no-show");
+
+  // Fetched regardless of the messaging send below (which is best-effort) —
+  // the caller (api-v1-queue.js) uses these for its staff Notification too.
+  let patient = null;
+  let doctor = null;
+  let apptTime = null;
+  if (appt.patientId) {
+    const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
+    const clinicRules = clinicSvc.getSchedulingRules(clinic ?? {});
+    apptTime = appt.timeslot ? formatHumanTime(new Date(appt.timeslot).getTime(), clinicRules.timezone) : null;
+    [{ data: patient }, { data: doctor }] = await Promise.all([
+      supabaseClient.from("Patient").select("fullName, contactNumber").eq("id", appt.patientId).maybeSingle(),
+      appt.doctorId
+        ? supabaseClient.from("Doctor").select("fullName").eq("id", appt.doctorId).maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]);
+
+    // Best-effort patient nudge — a messaging failure must never undo (or
+    // even surface as a failure of) the no-show confirmation itself, same
+    // posture as every other comms trigger in this file.
+    if (patient?.contactNumber) {
+      try {
+        await commsWorkflowSvc.sendImmediateWorkflowMessages(
+          {
+            supabaseClient,
+            twilioClient,
+            clinic,
+            trigger: "no_show",
+            appointmentId,
+            toPhone: patient.contactNumber,
+            data: {
+              clinicName: clinic?.name,
+              clinicPhone: clinic?.phone,
+              doctorName: doctor?.fullName,
+              patientName: patient.fullName,
+              apptTime,
+            },
+          },
+          log,
+        );
+      } catch (err) {
+        log?.error({ err, appointmentId }, "[appointmentSvc] no-show patient nudge failed");
+      }
+    }
+  }
+
+  return {
+    appointmentId,
+    status: "no_show",
+    patientName: patient?.fullName ?? null,
+    doctorName: doctor?.fullName ?? null,
+    apptTime,
+  };
+}
+
 // ─── Bulk reschedule / cancel ───────────────────────────────────────────────
 // Thin sequential wrappers over the single-record functions above — every
 // cutoff check, nettu call, and comms trigger they already do runs exactly
@@ -1007,4 +1163,7 @@ module.exports = {
   getPendingBookingById,
   finalizePendingBooking,
   expirePendingBookings,
+  markCompleted,
+  revertCompleted,
+  markNoShow,
 };
