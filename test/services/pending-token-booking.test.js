@@ -125,7 +125,7 @@ describe("finalizePendingBooking", () => {
   test("turns a pending row into a real Appointment, reusing the same appointmentId and nettu event", async () => {
     const { supabaseClient, nettu, created } = await seedPending();
 
-    const appointment = await appointmentSvc.finalizePendingBooking(supabaseClient, created.pendingBookingId, null, createTwilioStub());
+    const appointment = await appointmentSvc.finalizePendingBooking(nettu, supabaseClient, created.pendingBookingId, null, createTwilioStub());
 
     assert.equal(appointment.appointmentId, created.appointmentId);
     assert.equal(appointment.status, "booked");
@@ -137,10 +137,10 @@ describe("finalizePendingBooking", () => {
   });
 
   test("is idempotent — a second call (e.g. a Stripe webhook retry) does not double-book", async () => {
-    const { supabaseClient, created } = await seedPending();
+    const { supabaseClient, nettu, created } = await seedPending();
 
-    await appointmentSvc.finalizePendingBooking(supabaseClient, created.pendingBookingId, null, null);
-    const second = await appointmentSvc.finalizePendingBooking(supabaseClient, created.pendingBookingId, null, null);
+    await appointmentSvc.finalizePendingBooking(nettu, supabaseClient, created.pendingBookingId, null, null);
+    const second = await appointmentSvc.finalizePendingBooking(nettu, supabaseClient, created.pendingBookingId, null, null);
 
     assert.equal(second, null);
     assert.equal(supabaseClient._tables.Appointment.length, 1);
@@ -148,7 +148,7 @@ describe("finalizePendingBooking", () => {
 
   test("returns null for an unknown pending booking id instead of throwing", async () => {
     const supabaseClient = createTableStub({ Clinic: [makeClinic()], Doctor: [makeDoctor()] });
-    const result = await appointmentSvc.finalizePendingBooking(supabaseClient, "pbk_does_not_exist", null, null);
+    const result = await appointmentSvc.finalizePendingBooking(makeNettu(), supabaseClient, "pbk_does_not_exist", null, null);
     assert.equal(result, null);
   });
 });

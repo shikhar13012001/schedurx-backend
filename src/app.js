@@ -59,7 +59,7 @@ function createApp({
   // so it's mounted (with its own express.raw() parser, applied inside the
   // router itself) BEFORE express.json() below ever runs on the request.
   if (stripeClient) {
-    app.use("/webhooks/stripe", createStripeWebhookRouter(supabaseClient, stripeClient, twilioClient));
+    app.use("/webhooks/stripe", createStripeWebhookRouter(supabaseClient, stripeClient, twilioClient, nettuClient));
   }
 
   // Twilio's signature check needs the parsed application/x-www-form-urlencoded

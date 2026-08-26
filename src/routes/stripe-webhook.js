@@ -29,7 +29,7 @@ async function resolveClinicIdForSubscription(supabaseClient, subscription) {
   return data?.id ?? null;
 }
 
-function createStripeWebhookRouter(supabaseClient, stripeClient, twilioClient) {
+function createStripeWebhookRouter(supabaseClient, stripeClient, twilioClient, nettuClient) {
   const router = Router();
 
   router.post("/", raw({ type: "application/json" }), async (req, res) => {
@@ -49,7 +49,7 @@ function createStripeWebhookRouter(supabaseClient, stripeClient, twilioClient) {
         // real Appointment. Idempotent on the PendingBooking's own status,
         // so a Stripe retry of this same event is safe.
         try {
-          await appointmentSvc.finalizePendingBooking(supabaseClient, session.metadata.pendingBookingId, req.log, twilioClient);
+          await appointmentSvc.finalizePendingBooking(nettuClient, supabaseClient, session.metadata.pendingBookingId, req.log, twilioClient);
         } catch (err) {
           req.log?.error(
             { err, pendingBookingId: session.metadata.pendingBookingId },

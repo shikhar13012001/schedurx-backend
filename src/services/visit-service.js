@@ -106,10 +106,32 @@ async function findOrCreateTodaysVisit(supabaseClient, opts) {
   return createVisit(supabaseClient, { ...opts, visitDate: date });
 }
 
+// Deliberately excludes clinicId/patientId/doctorId/appointmentId/visitDate
+// (identity — never client-settable on an update) and prescription (no
+// current caller writes it through this general-purpose PATCH; the live
+// prescription feature renders a PDF client-side and attaches it via
+// POST /:id/attachments instead — see patients/[id]/page.tsx). A QA audit
+// (2026-08-26/27) live-proved this route previously spread the entire
+// request body into the DB write with zero allowlist and zero role check,
+// so any authenticated staff member — not just a doctor — could write
+// prescription content, and clinicId itself reached the write unfiltered.
+// If a real API-driven prescription-editing feature is ever built, it needs
+// its own doctor/owner role gate (requireRole in the route) added alongside
+// re-admitting "prescription" here — not by quietly falling out of this list.
+const EDITABLE_FIELDS = ["mode", "symptoms", "notes", "vitals", "followUpDate", "status"];
+
 async function updateVisit(supabaseClient, clinicId, visitId, patch) {
+  const updates = {};
+  for (const field of EDITABLE_FIELDS) {
+    if (field in patch) updates[field] = patch[field];
+  }
+  if (Object.keys(updates).length === 0) {
+    throw Object.assign(new Error("No editable fields provided"), { code: "MISSING_FIELDS", statusCode: 422 });
+  }
+
   const { data, error } = await supabaseClient
     .from("Visit")
-    .update({ ...patch, updatedAt: new Date().toISOString() })
+    .update({ ...updates, updatedAt: new Date().toISOString() })
     .eq("id", visitId)
     .eq("clinicId", clinicId)
     .select()

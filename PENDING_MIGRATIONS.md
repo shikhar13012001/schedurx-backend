@@ -1,7 +1,6 @@
 # Pending migrations (apply before the next droplet deploy)
 
-These five migrations landed in `main` (Phases 2, 3, 4, 6, 7 of the
-WhatsApp-on-plans + Stripe billing plan) but have **not** been applied to
+These migrations landed in `main` but have **not** been applied to
 production Supabase — this session has no Postgres DDL access (only the
 REST/service-role credentials), so they need to be run manually via the
 Supabase SQL Editor, in order:
@@ -11,6 +10,15 @@ Supabase SQL Editor, in order:
 3. `supabase/migrations/20260824_thread_booking_scope.sql`
 4. `supabase/migrations/20260824_thread_confirmed_patient.sql`
 5. `supabase/migrations/20260824_clinic_google_review_url.sql`
+6. `supabase/migrations/20260827_appointment_slot_uniqueness.sql` — **fixes a
+   live-reproduced double-booking bug** (QA audit, 2026-08-26/27): two
+   simultaneous booking requests for the identical doctor+slot both
+   succeeded. Adds a partial unique index that makes that impossible at the
+   database layer; `appointment-service.js`'s `persistAppointment()` already
+   ships code that catches the resulting constraint violation and turns it
+   into the normal "slot no longer available" error — that code is a no-op
+   until this index exists, so it's safe to deploy the code first, but the
+   actual fix isn't live until this migration runs.
 
 All are additive (`ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT
 EXISTS`) — safe to run against the live database with no downtime, and

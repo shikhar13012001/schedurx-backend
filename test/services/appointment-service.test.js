@@ -52,7 +52,7 @@ function makeDoctor(overrides = {}) {
   };
 }
 
-function makeSupabase({ clinic, doctor, appointment } = {}) {
+function makeSupabase({ clinic, doctor, appointment, insertError } = {}) {
   const clinicRow = clinic ?? makeClinic();
   const doctorRow = doctor ?? makeDoctor();
 
@@ -91,6 +91,7 @@ function makeSupabase({ clinic, doctor, appointment } = {}) {
         },
         async single() {
           if (table === "Appointment") {
+            if (insertError) return { data: null, error: insertError };
             const row = {
               id: self._inserts?.id ?? "apt_test",
               clinicId: self._inserts?.clinicId ?? clinicRow.id,
@@ -283,6 +284,48 @@ describe("bookAppointment", () => {
     );
   });
 
+  // Regression test for a live-reproduced bug (QA audit, 2026-08-26/27):
+  // two concurrent bookAppointment calls for the identical doctor+slot both
+  // succeeded, because the only conflict check lived inside nettu-scheduler's
+  // slot-listing query, never on the write itself. The real fix is a
+  // database-layer unique index (20260827_appointment_slot_uniqueness.sql)
+  // that can't be exercised by an in-memory mock — this instead proves the
+  // application-side half: when Postgres reports the constraint violation
+  // (code 23505, simulated here), persistAppointment must translate it into
+  // the normal SLOT_NOT_AVAILABLE error AND release the nettu hold the
+  // losing request already created, not leave a phantom busy block behind.
+  test("releases the nettu hold and throws SLOT_NOT_AVAILABLE when it loses a concurrent booking race", async () => {
+    const nettu = makeNettu();
+    const deleteCalls = [];
+    const origDelete = nettu.deleteEvent.bind(nettu);
+    nettu.deleteEvent = async (doctorSchedulerId, eventId) => {
+      deleteCalls.push({ doctorSchedulerId, eventId });
+      return origDelete(doctorSchedulerId, eventId);
+    };
+
+    const supabaseClient = makeSupabase({
+      insertError: { code: "23505", message: 'duplicate key value violates unique constraint "appointment_doctor_active_slot_idx"' },
+    });
+
+    await assert.rejects(
+      () =>
+        bookAppointment(nettu, supabaseClient, {
+          clinicId: "poc-clinic-001",
+          doctorId: "doc-priya-001",
+          start: FUTURE_START,
+          patient: { name: "Test Patient", phone: "+919999999999" },
+          source: "ultravox",
+        }),
+      (err) => {
+        assert.equal(err.code, "SLOT_NOT_AVAILABLE");
+        assert.equal(err.statusCode, 409);
+        return true;
+      },
+    );
+
+    assert.equal(deleteCalls.length, 1, "the orphaned nettu hold from the losing request must be released");
+  });
+
   test("throws SLOT_NOT_AVAILABLE when start time is in the past", async () => {
     const pastStart = new Date(Date.now() - 60_000).toISOString();
 
@@ -354,18 +397,25 @@ describe("cancelAppointment", () => {
     };
   }
 
-  function makeSupabaseWithAppt(appt) {
+  // Base makeSupabase()'s chain already supports .update().eq().eq().select()
+  // .maybeSingle() (each of .eq()/.select() just returns `this`) — no
+  // override needed for the happy path. `loseRace: true` simulates the
+  // race-guard: another request already changed this row's status between
+  // cancelAppointment's read and its conditional write, so the DB's WHERE
+  // no longer matches anything and maybeSingle() must resolve to no row.
+  function makeSupabaseWithAppt(appt, { loseRace = false } = {}) {
     const base = makeSupabase({ appointment: appt });
+    if (!loseRace) return base;
     const origFrom = base.from.bind(base);
     base.from = function (table) {
       const chain = origFrom(table);
-      // Stub update().eq() to return success
-      const origUpdate = chain.update.bind(chain);
-      chain.update = function (data) {
-        const updated = origUpdate(data);
-        updated.eq = () => ({ error: null });
-        return updated;
-      };
+      if (table === "Appointment") {
+        const origMaybeSingle = chain.maybeSingle.bind(chain);
+        chain.maybeSingle = async function () {
+          if (chain._updates) return { data: null, error: null };
+          return origMaybeSingle();
+        };
+      }
       return chain;
     };
     return base;
@@ -390,6 +440,30 @@ describe("cancelAppointment", () => {
     await assert.rejects(
       () =>
         cancelAppointment(makeNettu(), makeSupabaseWithAppt(cancelled), {
+          appointmentId: "apt_abc",
+          clinicId: "poc-clinic-001",
+          source: "ultravox",
+        }),
+      (err) => {
+        assert.equal(err.code, "APPOINTMENT_ALREADY_CANCELLED");
+        return true;
+      },
+    );
+  });
+
+  // Regression test for a live-reproduced bug (QA audit, 2026-08-26/27):
+  // two concurrent DELETE /api/v1/public/appointments/:id requests both
+  // returned 200 and both would have independently sent a cancellation
+  // WhatsApp notice, because the DB write wasn't conditioned on the status
+  // actually still being what the initial read saw. This simulates the
+  // race's outcome directly (the conditional update matches zero rows,
+  // exactly as it would in Postgres once a concurrent request already won)
+  // rather than trying to fire two real concurrent calls at an in-memory
+  // mock, which shares no actual database to race against.
+  test("does not report success (or re-send comms) when it loses a concurrent cancel race", async () => {
+    await assert.rejects(
+      () =>
+        cancelAppointment(makeNettu(), makeSupabaseWithAppt(makeAppt(), { loseRace: true }), {
           appointmentId: "apt_abc",
           clinicId: "poc-clinic-001",
           source: "ultravox",

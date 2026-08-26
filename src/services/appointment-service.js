@@ -226,7 +226,7 @@ async function validateAndReserveSlot(nettuClient, supabaseClient, opts, log, tw
 // normal booking, or later (via finalizePendingBooking) once Stripe confirms
 // a pay-first token payment. opts here is the same shape bookAppointment
 // always took; only the fields persistAppointment itself needs are read.
-async function persistAppointment(supabaseClient, reservation, opts, log, twilioClient) {
+async function persistAppointment(nettuClient, supabaseClient, reservation, opts, log, twilioClient) {
   const { clinic, doctor, timezone, startMs, endMs, durationMs, isBlocked, appointmentId, nettuEvent } = reservation;
   const {
     patientId,
@@ -282,6 +282,35 @@ async function persistAppointment(supabaseClient, reservation, opts, log, twilio
     .single();
 
   if (error) {
+    // appointment_doctor_active_slot_idx (20260827_appointment_slot_uniqueness.sql)
+    // is the real backstop against two concurrent bookings landing the same
+    // doctor+timeslot — nettu's own conflict check only ever guarded the
+    // slot-listing query, never the write, so two requests could both
+    // create a busy event and both reach this insert (confirmed live). The
+    // nettu event this reservation already created is now an orphaned hold
+    // on the doctor's calendar for a booking that didn't actually win —
+    // delete it so the slot doesn't stay falsely blocked.
+    if (error.code === "23505") {
+      log?.info(
+        { appointmentId, nettuEventId: nettuEvent?.id, clinicId: clinic.id, doctorId: doctor.id },
+        "[appointmentSvc] lost the race for this slot — releasing the now-orphaned nettu hold",
+      );
+      if (nettuEvent?.id && doctor.schedulerDoctorId) {
+        try {
+          await nettuClient.deleteEvent(doctor.schedulerDoctorId, nettuEvent.id);
+        } catch (cleanupErr) {
+          log?.warn(
+            { err: cleanupErr, nettuEventId: nettuEvent.id },
+            "[appointmentSvc] couldn't release orphaned nettu hold after losing a slot race — will show as busy until manually cleared",
+          );
+        }
+      }
+      throw Object.assign(new Error("The selected slot is no longer available"), {
+        code: "SLOT_NOT_AVAILABLE",
+        statusCode: 409,
+      });
+    }
+
     // DB failed after the nettu event was created — log for manual reconciliation.
     log?.error(
       { err: error, nettuEventId: nettuEvent?.id, clinicId: clinic.id, doctorId: doctor.id },
@@ -335,7 +364,7 @@ async function persistAppointment(supabaseClient, reservation, opts, log, twilio
 
 async function bookAppointment(nettuClient, supabaseClient, opts, log, twilioClient) {
   const reservation = await validateAndReserveSlot(nettuClient, supabaseClient, opts, log, twilioClient);
-  return persistAppointment(supabaseClient, reservation, opts, log, twilioClient);
+  return persistAppointment(nettuClient, supabaseClient, reservation, opts, log, twilioClient);
 }
 
 // ─── Pay-first token payments (Phase 3) ────────────────────────────────────
@@ -451,7 +480,7 @@ async function getPendingBookingById(supabaseClient, clinicId, pendingBookingId)
 // since the row is no longer status:"pending". Returns null (never throws)
 // for an unknown id or a non-pending row, matching invoice-service.js's
 // markPaidByStripeSession "defensive, never throws in a webhook path" shape.
-async function finalizePendingBooking(supabaseClient, pendingBookingId, log, twilioClient) {
+async function finalizePendingBooking(nettuClient, supabaseClient, pendingBookingId, log, twilioClient) {
   const { data: pending, error } = await supabaseClient
     .from("PendingBooking")
     .select("*")
@@ -488,6 +517,7 @@ async function finalizePendingBooking(supabaseClient, pendingBookingId, log, twi
   };
 
   const appointment = await persistAppointment(
+    nettuClient,
     supabaseClient,
     reservation,
     { ...pending.bookingParams, status: "booked", tokenRequested: true },
@@ -833,7 +863,16 @@ async function cancelAppointment(nettuClient, supabaseClient, opts, log, twilioC
   const auditEntry = buildAuditEntry("cancelled", { actor: source, reason });
   const currentHistory = Array.isArray(appt.auditHistory) ? appt.auditHistory : [];
 
-  const { error: updateErr } = await supabaseClient
+  // .eq("status", appt.status) makes this an optimistic-concurrency claim,
+  // not a blind write — the earlier `appt.status === "cancelled"` check
+  // above only guards against an *already*-cancelled appointment, not a
+  // second request racing this exact one (confirmed live: two concurrent
+  // cancels both returned 200 and both would have sent their own
+  // cancellation notice below). If another request already changed this
+  // row's status between our read and this write, zero rows match and
+  // `updated` comes back null — that's "lost the race," not a fresh
+  // success, so it must not fall through to sending comms again.
+  const { data: updated, error: updateErr } = await supabaseClient
     .from("Appointment")
     .update({
       status: "cancelled",
@@ -843,13 +882,24 @@ async function cancelAppointment(nettuClient, supabaseClient, opts, log, twilioC
       auditHistory: [...currentHistory, auditEntry],
       updatedAt: now,
     })
-    .eq("id", appointmentId);
+    .eq("id", appointmentId)
+    .eq("status", appt.status)
+    .select()
+    .maybeSingle();
 
   if (updateErr) {
     log?.error({ err: updateErr, appointmentId }, "[appointmentSvc] DB update failed after cancel");
     throw Object.assign(new Error("Database error cancelling appointment"), {
       code: "DATABASE_ERROR",
       statusCode: 500,
+    });
+  }
+
+  if (!updated) {
+    log?.info({ appointmentId }, "[appointmentSvc] lost the race to cancel this appointment — another request already changed it");
+    throw Object.assign(new Error("Appointment is already cancelled"), {
+      code: "APPOINTMENT_ALREADY_CANCELLED",
+      statusCode: 422,
     });
   }
 
