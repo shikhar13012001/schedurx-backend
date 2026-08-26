@@ -276,4 +276,61 @@ describe("acceptInvite", () => {
       /already been used/,
     );
   });
+
+  // Regression test for a source-verified gap (QA audit, 2026-08-26/27):
+  // acceptInvite used to mark the invite "accepted" only at the very end,
+  // after already creating Staff (and possibly Doctor) rows — so two
+  // different accounts racing the same invite link would both pass the
+  // initial read and both create their own rows from one invite. The above
+  // "second accept attempt" test only proves *sequential* reuse fails —
+  // by the time call two starts, call one has already fully finished, so
+  // it's caught by the ordinary already-accepted check, not by the new
+  // atomic claim. This simulates the actual race: the initial read still
+  // sees "pending" (so it doesn't reject early), but something else claims
+  // the row before this request's own conditional UPDATE runs — proving
+  // *that* write, not just the read, is what stops the second Staff row.
+  test("does not create a Staff row if it loses the race to claim the invite", async () => {
+    const supabaseClient = createTableStub({
+      StaffInvite: [
+        {
+          id: "invite-race",
+          token: hashToken("tok-race"),
+          status: "pending",
+          clinicId: "clinic-1",
+          name: "Anita",
+          phone: "+919999999999",
+          role: "receptionist",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      ],
+    });
+    const origFrom = supabaseClient.from.bind(supabaseClient);
+    supabaseClient.from = function (name) {
+      const chain = origFrom(name);
+      if (name === "StaffInvite") {
+        const origUpdate = chain.update.bind(chain);
+        chain.update = function (patch) {
+          // A concurrent request "wins" the moment ours starts its claim —
+          // by the time our own WHERE status='pending' filter is evaluated,
+          // the row no longer matches, exactly as Postgres would apply it.
+          const row = supabaseClient._tables.StaffInvite.find((r) => r.id === "invite-race");
+          if (row) row.status = "accepted";
+          return origUpdate(patch);
+        };
+      }
+      return chain;
+    };
+    const firebaseAdminApp = makeFirebaseAdminStub();
+
+    await assert.rejects(
+      () => staffInviteSvc.acceptInvite(supabaseClient, firebaseAdminApp, "tok-race", { firebaseUid: "fb-uid-race" }),
+      (err) => {
+        assert.equal(err.code, "INVITE_ALREADY_USED");
+        return true;
+      },
+    );
+
+    assert.equal(supabaseClient._tables.Staff?.length ?? 0, 0, "no Staff row should exist for the losing request");
+    assert.equal(firebaseAdminApp.calls.length, 0, "Firebase claims must not be set for the losing request");
+  });
 });

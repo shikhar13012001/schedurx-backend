@@ -151,6 +151,33 @@ async function getInviteByShortCode(supabaseClient, shortCode) {
 async function acceptInvite(supabaseClient, firebaseAdminApp, token, { firebaseUid, email }) {
   const invite = await getInviteByToken(supabaseClient, token);
 
+  // Claim the invite atomically before doing any work — .eq("status",
+  // "pending") makes this a real optimistic-concurrency claim, not a blind
+  // write. Previously this update ran only at the very end, after Staff
+  // (and possibly Doctor) rows were already created — two concurrent
+  // accepts of the same invite (a forwarded/leaked link, or the same
+  // invitee's own two devices racing) would both pass getInviteByToken's
+  // read and both create their own Staff/Doctor rows from the one invite.
+  // Staff.firebaseUid's unique index already prevented the *identical*
+  // invitee's second device from duplicating (see PR discussion), but did
+  // nothing for two genuinely different accounts hitting accept at once.
+  // If another request already claimed this invite between our read and
+  // this write, zero rows match and `claimed` comes back null.
+  const { data: claimed, error: claimErr } = await supabaseClient
+    .from("StaffInvite")
+    .update({ status: "accepted", acceptedAt: new Date().toISOString() })
+    .eq("id", invite.id)
+    .eq("status", "pending")
+    .select()
+    .maybeSingle();
+  if (claimErr) throw dbErr(`claiming invite: ${claimErr.message}`);
+  if (!claimed) {
+    throw Object.assign(new Error("This invite has already been used"), {
+      code: "INVITE_ALREADY_USED",
+      statusCode: 410,
+    });
+  }
+
   let doctorId = invite.doctorId ?? null;
   if (invite.role === "doctor" && !doctorId) {
     await assertCanInviteRole(supabaseClient, invite.clinicId, "doctor"); // re-check at accept time, not just invite time
@@ -183,12 +210,6 @@ async function acceptInvite(supabaseClient, firebaseAdminApp, token, { firebaseU
     doctorId: staff.doctorId ?? null,
     fullName: staff.fullName ?? null,
   });
-
-  const { error } = await supabaseClient
-    .from("StaffInvite")
-    .update({ status: "accepted", acceptedAt: new Date().toISOString() })
-    .eq("id", invite.id);
-  if (error) throw dbErr(`marking invite accepted: ${error.message}`);
 
   return { ...staff, doctorId, onboardingCompleted: false, onboardingStep: "you" };
 }

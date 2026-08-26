@@ -68,6 +68,14 @@ function systemPromptFor({ clinic, patient, timezone, scope = "general" }) {
         "reschedule_my_appointments right away with that one id — don't make them pick from a list unless their " +
         "request was genuinely ambiguous. Pass the exact date/time fields a slot gave you — never compute or retype " +
         "them yourself.",
+      "Cancelling — even a single appointment — is more destructive than rescheduling and needs clearer intent, not " +
+        "just a clear slot. Only call cancel_my_appointments when the patient has unambiguously said they want to " +
+        "cancel ('cancel it', 'I want to cancel', 'don't book me in anymore') — never from hesitation or uncertainty " +
+        "alone. 'I might not come' or 'I'm not sure I can make it' are NOT a cancellation request — ask whether they'd " +
+        "like to cancel or reschedule instead of guessing. A request to move, shift, or change the time — 'can I " +
+        "reschedule?', 'can I come at 6 instead?' — must always go through reschedule_my_appointments, never " +
+        "cancel_my_appointments, even if cancelling would technically satisfy it. If it's genuinely unclear whether " +
+        "they want to cancel or reschedule, ask one short clarifying question before calling either tool.",
       "For MORE THAN ONE appointment (e.g. 'move all my bookings to tomorrow', 'cancel everything I have this week'): " +
         "call get_my_appointments first, then say out loud in your reply which specific appointments (doctor + date/time " +
         "for each) you're about to change, and wait for the patient to clearly say yes before calling " +
