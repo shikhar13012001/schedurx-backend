@@ -24,7 +24,7 @@ async function listActiveDoctors(supabase, clinicId) {
     .from("Doctor")
     .select(
       "id, fullName, specialty, qualification, bio, languages, feeInr, schedulerDoctorId, schedulerCalendarId, " +
-        "workingHoursStart, workingHoursEnd, slotDurationOverrideMins",
+        "workingHoursStart, workingHoursEnd, slotDurationOverrideMins, registrations",
     )
     .eq("clinicId", clinicId)
     .eq("isActive", true)
