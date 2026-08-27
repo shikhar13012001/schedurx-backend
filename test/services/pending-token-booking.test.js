@@ -151,6 +151,56 @@ describe("finalizePendingBooking", () => {
     const result = await appointmentSvc.finalizePendingBooking(makeNettu(), supabaseClient, "pbk_does_not_exist", null, null);
     assert.equal(result, null);
   });
+
+  // Regression test for a source-verified gap (QA audit, 2026-08-26/27):
+  // finalizePendingBooking used to mark "completed" only at the very end,
+  // after already creating the real Appointment — Stripe documents webhook
+  // delivery as at-least-once, and a dashboard "resend" racing a slow
+  // original delivery is a real way for this function to run twice for one
+  // paid booking. The "is idempotent" test above only proves *sequential*
+  // reuse is safe (call one fully finishes before call two starts, so the
+  // ordinary status check alone would already catch it) — this simulates
+  // the actual race: the initial read still sees "pending", but the row
+  // changes between that read and this request's own claim.
+  test("does not double-book if it loses the race to claim the pending booking", async () => {
+    const { supabaseClient, nettu, created } = await seedPending();
+    const origFrom = supabaseClient.from.bind(supabaseClient);
+    supabaseClient.from = function (name) {
+      const chain = origFrom(name);
+      if (name === "PendingBooking") {
+        const origUpdate = chain.update.bind(chain);
+        chain.update = function (patch) {
+          // A concurrent delivery "wins" the instant ours starts its claim.
+          const row = supabaseClient._tables.PendingBooking.find((r) => r.id === created.pendingBookingId);
+          if (row) row.status = "completed";
+          return origUpdate(patch);
+        };
+      }
+      return chain;
+    };
+
+    const result = await appointmentSvc.finalizePendingBooking(nettu, supabaseClient, created.pendingBookingId, null, null);
+
+    assert.equal(result, null);
+    assert.equal((supabaseClient._tables.Appointment ?? []).length, 0, "the losing request must not create its own Appointment");
+  });
+
+  // If the actual booking work fails *after* this function has already
+  // claimed the row (e.g. the clinic/doctor lookup errors), the claim must
+  // not leave the pending booking permanently stuck — a paid booking with
+  // no appointment and no way to self-heal on the next webhook retry.
+  test("reverts the pending booking back to 'pending' if booking fails after the claim succeeds", async () => {
+    const { supabaseClient, nettu, created } = await seedPending();
+    // Force requireActiveDoctor to fail by removing the doctor row after
+    // the pending booking was created against it.
+    supabaseClient._tables.Doctor = [];
+
+    await assert.rejects(() => appointmentSvc.finalizePendingBooking(nettu, supabaseClient, created.pendingBookingId, null, null));
+
+    const pendingRow = supabaseClient._tables.PendingBooking.find((r) => r.id === created.pendingBookingId);
+    assert.equal(pendingRow.status, "pending", "a failed finalize must revert the claim so a later retry can recover");
+    assert.equal((supabaseClient._tables.Appointment ?? []).length, 0);
+  });
 });
 
 describe("expirePendingBookings", () => {

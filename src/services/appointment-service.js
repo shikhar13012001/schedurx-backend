@@ -496,41 +496,70 @@ async function finalizePendingBooking(nettuClient, supabaseClient, pendingBookin
     return null;
   }
 
-  const clinic = await clinicSvc.requireActiveClinic(supabaseClient, pending.clinicId);
-  const doctor = await doctorSvc.requireActiveDoctor(supabaseClient, pending.doctorId, pending.clinicId);
-  const clinicRules = clinicSvc.getSchedulingRules(clinic);
-  const doctorRules = doctorSvc.getSchedulingRules(doctor, clinicRules);
-  const timezone = doctorRules.timezone;
-  const startMs = new Date(pending.timeslot).getTime();
-  const durationMs = pending.durationMinutes * 60_000;
-
-  const reservation = {
-    clinic,
-    doctor,
-    timezone,
-    startMs,
-    endMs: startMs + durationMs,
-    durationMs,
-    isBlocked: false,
-    appointmentId: pending.appointmentId,
-    nettuEvent: { id: pending.schedulerEventId },
-  };
-
-  const appointment = await persistAppointment(
-    nettuClient,
-    supabaseClient,
-    reservation,
-    { ...pending.bookingParams, status: "booked", tokenRequested: true },
-    log,
-    twilioClient,
-  );
-
-  await supabaseClient
+  // Claim atomically before doing any work — same fix shape as
+  // bookAppointment/cancelAppointment/acceptInvite. Stripe explicitly
+  // documents webhooks as at-least-once delivery, and a dashboard "resend"
+  // racing a slow original delivery is a real, not hypothetical, way for
+  // two calls to reach this function for the same pending booking at once.
+  // The read above only ever ran once before proceeding straight to
+  // persistAppointment, so two near-simultaneous deliveries could both
+  // pass it and both create a real Appointment from one Stripe payment.
+  // PendingBooking.status has a CHECK constraint allowing only
+  // pending/completed/expired/cancelled (no "in progress" state to claim
+  // into), so this claims straight to "completed" and reverts to "pending"
+  // if the actual booking work below fails, so a genuine failure can still
+  // be recovered by a later retry instead of leaving a paid booking stuck
+  // with no appointment and no way to self-heal.
+  const { data: claimed, error: claimErr } = await supabaseClient
     .from("PendingBooking")
     .update({ status: "completed", updatedAt: new Date().toISOString() })
-    .eq("id", pendingBookingId);
+    .eq("id", pendingBookingId)
+    .eq("status", "pending")
+    .select()
+    .maybeSingle();
+  if (claimErr) throw Object.assign(new Error(`DB error: ${claimErr.message}`), { code: "DATABASE_ERROR", statusCode: 500 });
+  if (!claimed) {
+    log?.info({ pendingBookingId }, "[appointmentSvc] finalizePendingBooking: lost the race to claim this pending booking");
+    return null;
+  }
 
-  return appointment;
+  try {
+    const clinic = await clinicSvc.requireActiveClinic(supabaseClient, pending.clinicId);
+    const doctor = await doctorSvc.requireActiveDoctor(supabaseClient, pending.doctorId, pending.clinicId);
+    const clinicRules = clinicSvc.getSchedulingRules(clinic);
+    const doctorRules = doctorSvc.getSchedulingRules(doctor, clinicRules);
+    const timezone = doctorRules.timezone;
+    const startMs = new Date(pending.timeslot).getTime();
+    const durationMs = pending.durationMinutes * 60_000;
+
+    const reservation = {
+      clinic,
+      doctor,
+      timezone,
+      startMs,
+      endMs: startMs + durationMs,
+      durationMs,
+      isBlocked: false,
+      appointmentId: pending.appointmentId,
+      nettuEvent: { id: pending.schedulerEventId },
+    };
+
+    return await persistAppointment(
+      nettuClient,
+      supabaseClient,
+      reservation,
+      { ...pending.bookingParams, status: "booked", tokenRequested: true },
+      log,
+      twilioClient,
+    );
+  } catch (err) {
+    log?.error({ err, pendingBookingId }, "[appointmentSvc] finalizePendingBooking: booking failed after claiming — reverting to pending so a retry can recover");
+    await supabaseClient
+      .from("PendingBooking")
+      .update({ status: "pending", updatedAt: new Date().toISOString() })
+      .eq("id", pendingBookingId);
+    throw err;
+  }
 }
 
 // Run periodically (see server.js) — releases the nettu hold and marks any
