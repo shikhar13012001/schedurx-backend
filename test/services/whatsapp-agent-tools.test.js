@@ -72,11 +72,16 @@ function makeTables(extra = {}) {
         status: "booked",
       },
       {
+        // 100h, not 48h — deliberately not exactly "apt_mine's 24h + a
+        // 1-day shift", which would otherwise put this same-doctor
+        // appointment (for an unrelated patient) directly in the path of
+        // the bulk-reschedule test below and get correctly rejected as a
+        // genuine conflict, not the case that test means to exercise.
         id: "apt_someone_elses",
         clinicId: CLINIC_ID,
         patientId: OTHER_PATIENT_ID,
         doctorId: "doc-1",
-        timeslot: futureIso(48),
+        timeslot: futureIso(100),
         status: "booked",
       },
       {

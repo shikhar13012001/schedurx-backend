@@ -52,7 +52,7 @@ function makeDoctor(overrides = {}) {
   };
 }
 
-function makeSupabase({ clinic, doctor, appointment, insertError } = {}) {
+function makeSupabase({ clinic, doctor, appointment, insertError, conflictingAppointments } = {}) {
   const clinicRow = clinic ?? makeClinic();
   const doctorRow = doctor ?? makeDoctor();
 
@@ -72,6 +72,40 @@ function makeSupabase({ clinic, doctor, appointment, insertError } = {}) {
         },
         is(col, val) {
           return this;
+        },
+        in(col, vals) {
+          this._filters[col] = vals;
+          return this;
+        },
+        neq(col, val) {
+          return this;
+        },
+        gte(col, val) {
+          return this;
+        },
+        lt(col, val) {
+          return this;
+        },
+        lte(col, val) {
+          return this;
+        },
+        // Real supabase-js query builders are themselves thenable — the new
+        // overlap check in validateAndReserveSlot awaits a filter chain bare
+        // (no .maybeSingle()/.single() terminal). Defaults to "no existing
+        // conflicting rows" — the correct assumption for every test here
+        // that isn't specifically exercising the overlap check itself;
+        // `conflictingAppointments` (an optional makeSupabase param) lets a
+        // test inject real rows when it needs to.
+        then(resolve) {
+          if (table === "Appointment" && !this._inserts && !this._updates) {
+            const statusFilter = this._filters.status;
+            const rows = (conflictingAppointments ?? []).filter(
+              (row) => !statusFilter || statusFilter.includes(row.status),
+            );
+            resolve({ data: rows, error: null });
+          } else {
+            resolve({ data: null, error: null });
+          }
         },
         update(data) {
           this._updates = data;
@@ -268,6 +302,67 @@ describe("bookAppointment", () => {
     assert.equal(supabaseClient._tables.Reminder[0].type, "booking-conf");
   });
 
+  // Regression test for live-reported feedback (2026-08-31): a doctor
+  // blocking time over an existing booking cancelled it but the patient
+  // received no message at all. Root cause: cancelAppointment's own
+  // cancellation notice is conditional on the clinic's configurable
+  // communication workflows — deliberately left as-is here (Clinic has no
+  // `settings.communication` configured at all) to prove the NEW direct
+  // notice fires independent of that toggle, not because this test
+  // disables it.
+  test("blocking time over an existing booking sends a direct rebook SMS, independent of workflow settings", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [
+        {
+          id: "clinic-1", status: "active", name: "Nirmaya Clinic", phone: "+919999999999",
+          schedulerServiceId: "svc-001", timezone: "Asia/Kolkata", openingHour: 9, closingHour: 18,
+          minNoticeHours: 0, maxBookingWindowDays: 30, cancellationCutoffHours: 0,
+          // Deliberately no `settings` at all — the exact shape an older
+          // clinic (like the real seed clinic this was reported against)
+          // can be in if it predates the communication-workflow feature.
+        },
+      ],
+      Doctor: [
+        {
+          id: "doc-priya-001", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true,
+          schedulerDoctorId: "nettu-user-001", schedulerCalendarId: "nettu-cal-001",
+          workingHoursStart: "09:00", workingHoursEnd: "18:00",
+        },
+      ],
+      Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+      Appointment: [
+        {
+          id: "apt_conflict", clinicId: "clinic-1", doctorId: "doc-priya-001", patientId: "pat-1",
+          timeslot: FUTURE_START, durationMinutes: 30, status: "booked", auditHistory: [],
+        },
+      ],
+    });
+    const twilioClient = createTwilioStub();
+
+    await bookAppointment(
+      makeNettu(),
+      supabaseClient,
+      {
+        clinicId: "clinic-1",
+        doctorId: "doc-priya-001",
+        start: FUTURE_START,
+        end: new Date(new Date(FUTURE_START).getTime() + 2 * 60 * 60 * 1000).toISOString(),
+        status: "blocked",
+        source: "reception",
+      },
+      null,
+      twilioClient,
+    );
+
+    const rebookSend = twilioClient.calls.sendSms.find((c) => c.purpose === "doctor_unavailable_rebook");
+    assert.ok(rebookSend, "expected a direct doctor_unavailable_rebook SMS");
+    assert.equal(rebookSend.to, "+919888888888");
+    assert.match(rebookSend.body, /Rahul.*Dr\. Priya.*Nirmaya Clinic.*no longer available.*cancelled/s);
+
+    const conflictRow = supabaseClient._tables.Appointment.find((a) => a.id === "apt_conflict");
+    assert.equal(conflictRow.status, "cancelled");
+  });
+
   test("throws SLOT_NOT_AVAILABLE on 409 from nettu", async () => {
     await assert.rejects(
       () =>
@@ -324,6 +419,82 @@ describe("bookAppointment", () => {
     );
 
     assert.equal(deleteCalls.length, 1, "the orphaned nettu hold from the losing request must be released");
+  });
+
+  // Regression tests for a real gap reported from live usage (2026-08-31):
+  // a doctor could book (or their receptionist could book) a new
+  // appointment directly into a window already marked "Blocked", and could
+  // double-tap Block Time to create two overlapping blocks. The database
+  // unique index added earlier (20260827_appointment_slot_uniqueness.sql)
+  // only rejects an EXACT timeslot match — it does nothing for the far more
+  // common real case of a range overlap with a *different* start time (a
+  // 2-hour block at 10:00 vs. a 30-min appointment attempted at 10:30).
+  // These prove the new range-aware overlap check added to
+  // validateAndReserveSlot actually catches that.
+  test("rejects a booking whose time range overlaps an existing block, even when the start times don't match exactly", async () => {
+    const startMs = new Date(FUTURE_START).getTime();
+    const conflictingBlock = {
+      id: "apt_existing_block",
+      timeslot: new Date(startMs - 15 * 60 * 1000).toISOString(), // starts 15 min BEFORE the new request
+      durationMinutes: 120, // a 2-hour block — comfortably covers FUTURE_START
+      status: "blocked",
+    };
+    await assert.rejects(
+      () =>
+        bookAppointment(makeNettu(), makeSupabase({ conflictingAppointments: [conflictingBlock] }), {
+          clinicId: "poc-clinic-001",
+          doctorId: "doc-priya-001",
+          start: FUTURE_START,
+          patient: { name: "Test Patient", phone: "+919999999999" },
+          source: "ultravox",
+        }),
+      (err) => {
+        assert.equal(err.code, "SLOT_NOT_AVAILABLE");
+        return true;
+      },
+    );
+  });
+
+  test("rejects creating a block that overlaps an existing block (no exact start-time match required)", async () => {
+    const startMs = new Date(FUTURE_START).getTime();
+    const conflictingBlock = {
+      id: "apt_existing_block_2",
+      timeslot: new Date(startMs + 10 * 60 * 1000).toISOString(), // starts 10 min INTO the new block
+      durationMinutes: 30,
+      status: "blocked",
+    };
+    await assert.rejects(
+      () =>
+        bookAppointment(makeNettu(), makeSupabase({ conflictingAppointments: [conflictingBlock] }), {
+          clinicId: "poc-clinic-001",
+          doctorId: "doc-priya-001",
+          start: FUTURE_START,
+          end: new Date(startMs + 60 * 60 * 1000).toISOString(), // 1-hour block
+          status: "blocked",
+          source: "reception",
+        }),
+      (err) => {
+        assert.equal(err.code, "SLOT_NOT_AVAILABLE");
+        return true;
+      },
+    );
+  });
+
+  test("a block still displaces an existing booked appointment rather than being rejected as a conflict", async () => {
+    // Regression guard: the new overlap check must not break the existing,
+    // intended behavior where blocking auto-cancels a conflicting booked
+    // appointment instead of refusing the block outright.
+    const startMs = new Date(FUTURE_START).getTime();
+    const conflictingBooking = { id: "apt_existing_booking", timeslot: FUTURE_START, durationMinutes: 30, status: "booked" };
+    const result = await bookAppointment(makeNettu(), makeSupabase({ conflictingAppointments: [conflictingBooking] }), {
+      clinicId: "poc-clinic-001",
+      doctorId: "doc-priya-001",
+      start: FUTURE_START,
+      end: new Date(startMs + 60 * 60 * 1000).toISOString(),
+      status: "blocked",
+      source: "reception",
+    });
+    assert.equal(result.status, "blocked");
   });
 
   test("throws SLOT_NOT_AVAILABLE when start time is in the past", async () => {

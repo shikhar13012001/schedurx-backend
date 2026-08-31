@@ -17,6 +17,47 @@ function bookingUrlFor(clinicId, appointmentId) {
   return config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${appointmentId}` : undefined;
 }
 
+// Same phone-scoped link shape used everywhere else a patient needs a
+// self-serve rebooking entry point not tied to one specific (now-defunct)
+// appointment — webhooks-twilio.js's missed-call/self-service links,
+// tool-helpers.js's WhatsApp fallback. A cancelled appointment's own manage
+// page has nothing left to reschedule; this is the "pick any new slot"
+// door instead.
+function rebookUrlFor(clinicId, patientPhone) {
+  return config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${encodeURIComponent(patientPhone)}` : undefined;
+}
+
+// Direct, always-fires SMS for the one case an appointment disappears
+// through no fault of the patient's — the doctor blocking that exact time.
+// Deliberately bypasses the configurable communication-workflow system
+// (clinic.settings.communication) that every other trigger in this file
+// goes through, and deliberately uses SMS rather than a WhatsApp Content
+// Template — see the call site's comment for why both of those are
+// intentional, not oversights. Never throws — a failure here must not
+// undo or fail the block/cancel that already genuinely happened.
+async function sendDoctorUnavailableRebookNotice(supabaseClient, twilioClient, { clinic, clinicRules, conflict, doctor }, log) {
+  if (!twilioClient || !conflict.patientId) return;
+  try {
+    const { data: patient } = await supabaseClient
+      .from("Patient")
+      .select("fullName, contactNumber")
+      .eq("id", conflict.patientId)
+      .maybeSingle();
+    if (!patient?.contactNumber) return;
+
+    const oldTime = formatHumanTime(new Date(conflict.timeslot).getTime(), clinicRules.timezone);
+    const rebookUrl = rebookUrlFor(clinic.id, patient.contactNumber);
+    const firstName = (patient.fullName ?? "there").split(" ")[0];
+    const body = rebookUrl
+      ? `Hi ${firstName}, ${doctor?.fullName ?? "your doctor"} at ${clinic.name} is no longer available for your ${oldTime} appointment and it's been cancelled. Please pick a new time here: ${rebookUrl}`
+      : `Hi ${firstName}, ${doctor?.fullName ?? "your doctor"} at ${clinic.name} is no longer available for your ${oldTime} appointment and it's been cancelled. Please call the clinic to rebook.`;
+
+    await twilioClient.sendSms({ to: patient.contactNumber, body, clinicId: clinic.id, purpose: "doctor_unavailable_rebook" });
+  } catch (err) {
+    log?.error({ err, appointmentId: conflict.id }, "[appointmentSvc] couldn't send the doctor-unavailable rebook notice");
+  }
+}
+
 const SAFE_TITLE_PREFIX = "Appointment";
 
 // How long before an event's start nettu-scheduler calls our reminder
@@ -119,6 +160,58 @@ async function validateAndReserveSlot(nettuClient, supabaseClient, opts, log, tw
   const durationMs = endMs - startMs;
   const isBlocked = status === "blocked";
 
+  // Reject any new booking/block whose time RANGE overlaps an existing
+  // active appointment or block for this doctor — this is the general
+  // conflict guard nettu's own createEvent never provided (its "busy"
+  // event creation has no write-time rejection at all; conflict avoidance
+  // only ever happened by not *listing* an occupied slot in the first
+  // place — confirmed live: two concurrent bookings for the identical
+  // slot both succeeded before this fix). The database-level unique index
+  // added alongside this (20260827_appointment_slot_uniqueness.sql) only
+  // catches an EXACT timeslot match, which misses the more common real
+  // case — e.g. a 2-hour block starting 10:00 vs. a 30-minute appointment
+  // submitted at 10:30, a different `timeslot` value that overlaps in
+  // real time but not by exact equality. This check is range-aware and
+  // doesn't depend on that migration having been applied.
+  //
+  // A block is allowed to override an existing booked/tentative
+  // appointment (handled below by auto-cancelling it) but must never
+  // silently stack on top of an *existing block*; a normal booking must
+  // never be allowed into a doctor's already-blocked (or already-booked)
+  // time. Still has a small race window against a truly simultaneous
+  // second write (this is a read-then-decide check, not an atomic
+  // database constraint) — the unique index is the backstop for that;
+  // this check is what actually catches the case reported live.
+  {
+    const overlapStatuses = isBlocked ? ["blocked"] : ["booked", "tentative", "blocked"];
+    const { data: existingRows, error: overlapErr } = await supabaseClient
+      .from("Appointment")
+      .select("id, timeslot, durationMinutes")
+      .eq("clinicId", clinicId)
+      .eq("doctorId", doctorId)
+      .in("status", overlapStatuses)
+      .gte("timeslot", new Date(startMs - 24 * 60 * 60 * 1000).toISOString())
+      .lt("timeslot", new Date(endMs).toISOString());
+
+    if (overlapErr) {
+      throw Object.assign(new Error(`DB error checking for conflicts: ${overlapErr.message}`), {
+        code: "DATABASE_ERROR",
+        statusCode: 500,
+      });
+    }
+    const hasOverlap = (existingRows ?? []).some((row) => {
+      const rowStartMs = new Date(row.timeslot).getTime();
+      const rowEndMs = rowStartMs + (row.durationMinutes ?? 30) * 60_000;
+      return rowStartMs < endMs && rowEndMs > startMs; // standard interval-overlap test
+    });
+    if (hasOverlap) {
+      throw Object.assign(new Error("The selected slot is no longer available"), {
+        code: "SLOT_NOT_AVAILABLE",
+        statusCode: 409,
+      });
+    }
+  }
+
   // A block is a deliberate doctor override, not something that should
   // silently coexist with a real booking already sitting in that window (the
   // nettu busy-event conflict check below only guards against two blocks
@@ -131,7 +224,7 @@ async function validateAndReserveSlot(nettuClient, supabaseClient, opts, log, tw
   if (isBlocked) {
     const { data: possiblyConflicting, error: conflictErr } = await supabaseClient
       .from("Appointment")
-      .select("id, timeslot, durationMinutes")
+      .select("id, timeslot, durationMinutes, patientId")
       .eq("clinicId", clinicId)
       .eq("doctorId", doctorId)
       .in("status", ["booked", "tentative"])
@@ -153,6 +246,20 @@ async function validateAndReserveSlot(nettuClient, supabaseClient, opts, log, tw
             log,
             twilioClient,
           );
+          // cancelAppointment's own patient-facing message is the standard
+          // "cancellation" workflow — which, like every workflow trigger, is
+          // conditional on the clinic having that channel/trigger enabled in
+          // settings.communication (confirmed live: a real cancellation this
+          // way produced no patient-facing message at all, on a clinic where
+          // that toggle wasn't on). Losing a slot to the doctor's own
+          // unavailability isn't optional/marketing-style communication —
+          // it's the one case an appointment disappears through no fault of
+          // the patient's, so this sends a direct, un-toggleable SMS with a
+          // way to rebook, independent of that workflow config. SMS (not a
+          // WhatsApp template) specifically because it needs no Meta/Twilio
+          // template pre-approval — this path has to keep working the first
+          // time it's ever needed, not after a template review cycle.
+          await sendDoctorUnavailableRebookNotice(supabaseClient, twilioClient, { clinic, clinicRules, conflict, doctor }, log);
         } catch (err) {
           log?.error({ err, appointmentId: conflict.id }, "[appointmentSvc] couldn't auto-cancel conflicting appointment before blocking");
         }
@@ -665,6 +772,44 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
       code: "SLOT_NOT_AVAILABLE",
       statusCode: 422,
     });
+  }
+
+  // Same range-overlap guard as validateAndReserveSlot — rescheduleAppointment
+  // has always been a fully separate code path that never went through that
+  // function, so it never got any conflict protection at all, not even
+  // nettu's exact-slot-listing kind. Excludes this appointment's own current
+  // row from the check (a reschedule that only shifts by a few minutes would
+  // otherwise "conflict" with itself).
+  {
+    const newIsBlocked = appt.status === "blocked";
+    const overlapStatuses = newIsBlocked ? ["blocked"] : ["booked", "tentative", "blocked"];
+    const { data: existingRows, error: overlapErr } = await supabaseClient
+      .from("Appointment")
+      .select("id, timeslot, durationMinutes")
+      .eq("clinicId", clinicId)
+      .eq("doctorId", doctorId)
+      .neq("id", appointmentId)
+      .in("status", overlapStatuses)
+      .gte("timeslot", new Date(newStartMs - 24 * 60 * 60 * 1000).toISOString())
+      .lt("timeslot", new Date(newEndMs).toISOString());
+
+    if (overlapErr) {
+      throw Object.assign(new Error(`DB error checking for conflicts: ${overlapErr.message}`), {
+        code: "DATABASE_ERROR",
+        statusCode: 500,
+      });
+    }
+    const hasOverlap = (existingRows ?? []).some((row) => {
+      const rowStartMs = new Date(row.timeslot).getTime();
+      const rowEndMs = rowStartMs + (row.durationMinutes ?? 30) * 60_000;
+      return rowStartMs < newEndMs && rowEndMs > newStartMs;
+    });
+    if (hasOverlap) {
+      throw Object.assign(new Error("The selected slot is no longer available"), {
+        code: "SLOT_NOT_AVAILABLE",
+        statusCode: 409,
+      });
+    }
   }
 
   log?.info({ appointmentId, newStart, source }, "[appointmentSvc] rescheduling appointment");
