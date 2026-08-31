@@ -18,6 +18,7 @@ process.env.STRIPE_PRICE_BASIC = "price_basic_test";
 process.env.STRIPE_PRICE_PREMIUM = "price_premium_test";
 process.env.STRIPE_PRICE_ADDON_AI_WHATSAPP_AGENT = "price_addon_wa_test";
 process.env.PATIENT_APP_BASE_URL = "https://book.schedurx.example";
+process.env.PUBLIC_API_BASE_URL = "https://api.schedurx.example";
 
 const { createApp } = require("../../src/app");
 const { createTableStub } = require("../helpers/supabase-table-stub");
@@ -2961,7 +2962,16 @@ test("POST /webhooks/twilio/whatsapp-inbound structured fallback links to the ap
     Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
     Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
     Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919888888888" }],
-    Appointment: [{ id: "apt_booking_2", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+    Appointment: [
+      {
+        id: "apt_booking_2",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        patientId: "pat-1",
+        status: "booked",
+        timeslot: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      },
+    ],
   });
   const twilioClient = createTwilioStub();
   const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
@@ -2977,6 +2987,13 @@ test("POST /webhooks/twilio/whatsapp-inbound structured fallback links to the ap
   assert.match(bookingReply, /book\.schedurx\.example\/clinic-1\/apt_booking_2/);
   assert.doesNotMatch(bookingReply, /919888888888/);
 
+  // A completely ordinary message (not a "BOOKING <id>" deep link) from the
+  // SAME patient, who genuinely has an upcoming appointment — this is the
+  // exact case a live report (2026-08-31) found broken: the reply used to
+  // always fall back to the generic phone-based intake link here, because
+  // it only ever checked how the *thread* started, never whether the
+  // patient actually has a booking. Now it looks up their real upcoming
+  // appointments and must link to the existing one, not invite a new one.
   const generalReply = await withServer(app, async ({ request }) => {
     const response = await request("/webhooks/twilio/whatsapp-inbound", {
       method: "POST",
@@ -2985,7 +3002,34 @@ test("POST /webhooks/twilio/whatsapp-inbound structured fallback links to the ap
     });
     return response.text();
   });
-  assert.match(generalReply, /book\.schedurx\.example\/clinic-1\/%2B919888888888/);
+  assert.match(generalReply, /book\.schedurx\.example\/clinic-1\/apt_booking_2/);
+  assert.doesNotMatch(generalReply, /919888888888/);
+});
+
+test("POST /webhooks/twilio/whatsapp-inbound: an ordinary message from a patient with NO existing booking gets a fresh signed rebook link, not a raw phone number in the URL", async () => {
+  const supabaseClient = createTableStub({
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Patient: [{ id: "pat-2", clinicId: "clinic-1", fullName: "New Patient", contactNumber: "+919888888899" }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
+
+  const reply = await withServer(app, async ({ request }) => {
+    const response = await request("/webhooks/twilio/whatsapp-inbound", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
+      body: formBody({ From: "whatsapp:+919888888899", To: "whatsapp:+19789069398", Body: "Hi there", MessageSid: "SM-general-2" }),
+    });
+    return response.text();
+  });
+
+  assert.doesNotMatch(reply, /919888888899/, "the raw phone number must not appear in the URL");
+  const match = reply.match(/https:\/\/api\.schedurx\.example\/r\/([\w-]+\.[\w-]+)/);
+  assert.ok(match, `expected a signed /r/<token> link in the reply, got: ${reply}`);
+
+  const { verifyRebookToken } = require("../../src/lib/rebook-token");
+  const claims = verifyRebookToken(match[1]);
+  assert.deepEqual(claims, { clinicId: "clinic-1", phone: "+919888888899" });
 });
 
 test("POST /webhooks/twilio/whatsapp-inbound rejects a BOOKING deep link when the phone doesn't match the appointment's patient", async () => {

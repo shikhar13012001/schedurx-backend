@@ -15,6 +15,7 @@ const { createApiV1PublicRouter } = require("./routes/api-v1-public");
 const { createStripeWebhookRouter } = require("./routes/stripe-webhook");
 const { createNettuWebhookRouter } = require("./routes/webhooks-nettu");
 const { createTwilioWebhookRouter } = require("./routes/webhooks-twilio");
+const { verifyRebookToken } = require("./lib/rebook-token");
 const { mountDocs } = require("./docs");
 
 function createApp({
@@ -110,6 +111,20 @@ function createApp({
       service: "schedurx-backend",
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // Short-lived, signed rebook link — see lib/rebook-token.js. Sent instead
+  // of a raw phone-number-in-URL link on non-AI plans' WhatsApp fallback
+  // reply, so the link a patient receives is freshly generated and
+  // unguessable rather than a stable, enumerable value. No auth needed
+  // here (that's the point — a WhatsApp recipient has no session), the
+  // token itself is the credential.
+  app.get("/r/:token", (request, response) => {
+    const claims = verifyRebookToken(request.params.token);
+    if (!claims || !config.PATIENT_APP_BASE_URL) {
+      return response.status(404).send("This link has expired. Please message the clinic again for a fresh one.");
+    }
+    response.redirect(302, `${config.PATIENT_APP_BASE_URL}/${claims.clinicId}/${encodeURIComponent(claims.phone)}`);
   });
 
   // Unconditional — no client/env var gates the API docs themselves.

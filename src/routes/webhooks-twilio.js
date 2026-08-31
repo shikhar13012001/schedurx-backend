@@ -39,6 +39,7 @@ const notificationSvc = require("../services/notification-service");
 const plansSvc = require("../lib/plans");
 const crypto = require("node:crypto");
 const { config } = require("../config");
+const { createRebookToken } = require("../lib/rebook-token");
 
 const GREETING_BUCKET = "clinic-voice";
 
@@ -226,26 +227,41 @@ async function resolveBookingThread(supabaseClient, appointmentId, fromPhone, lo
 // would — sendTemplatedMessage's contentSid path is for outside-24h-session
 // sends, which this isn't.
 //
-// A booking-scoped thread (the caller texted "BOOKING <apt_id>", or is
-// replying inside one already) means we already know exactly which
-// appointment this is about — link straight to its manage page instead of
-// the phone-based fresh-intake entry point, which would otherwise put
-// someone with an existing, already-paid booking back at "choose a doctor,
-// pick a time" as if they'd never booked at all.
-function buildStructuredFallbackReply(clinic, thread) {
-  const isBookingScoped = thread.scope === "booking" && thread.appointmentId;
-  const selfServiceUrl = config.PATIENT_APP_BASE_URL
-    ? `${config.PATIENT_APP_BASE_URL}/${clinic.id}/${isBookingScoped ? thread.appointmentId : encodeURIComponent(thread.contactPhone)}`
-    : null;
-  const lines = [
-    `Thanks for messaging ${clinic.name ?? "our clinic"}! Our team will get back to you shortly.`,
-  ];
-  if (selfServiceUrl) {
-    lines.push(
-      isBookingScoped
-        ? `View or manage your appointment here: ${selfServiceUrl}`
-        : `To book, reschedule, or cancel an appointment yourself right now: ${selfServiceUrl}`,
-    );
+// Which appointment (if any) this reply should point at. A booking-scoped
+// thread (the caller texted "BOOKING <apt_id>", or is replying inside one
+// already) already tells us exactly which one — prefer that. Otherwise,
+// this used to just check `thread.scope === "booking"` and stop there,
+// which meant a completely ordinary inbound message — the overwhelmingly
+// common case, nobody arrives via the deep-link path in practice — always
+// looked like "no booking exists" even when the patient plainly had one,
+// because thread.scope reflects how the *conversation* started, not
+// whether an appointment currently exists. This looks at the patient's
+// real upcoming appointments instead (confirmed live: a real patient with
+// a real upcoming appointment got the generic "book a new one" link, not
+// "manage your appointment", because of exactly this gap).
+async function resolveRelevantAppointmentId(supabaseClient, clinic, patient, thread) {
+  if (thread.scope === "booking" && thread.appointmentId) return thread.appointmentId;
+  if (!patient?.id) return null;
+  const upcoming = await tableSvc.listUpcomingAppointmentsForPatient(supabaseClient, clinic.id, patient.id);
+  return upcoming?.[0]?.id ?? null;
+}
+
+async function buildStructuredFallbackReply(supabaseClient, clinic, patient, thread) {
+  const appointmentId = await resolveRelevantAppointmentId(supabaseClient, clinic, patient, thread);
+  const lines = [`Thanks for messaging ${clinic.name ?? "our clinic"}! Our team will get back to you shortly.`];
+
+  if (appointmentId) {
+    const manageUrl = config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinic.id}/${appointmentId}` : null;
+    if (manageUrl) lines.push(`View or manage your appointment here: ${manageUrl}`);
+  } else {
+    // No existing booking — a signed, freshly-generated link (see
+    // lib/rebook-token.js), not the patient's raw phone number in the URL.
+    // The old shape (.../clinicId/+91XXXXXXXXXX) was the same predictable
+    // link shape for every patient, differing only by a guessable phone
+    // number — this is a genuinely new, unguessable token each time.
+    const token = createRebookToken({ clinicId: clinic.id, phone: thread.contactPhone });
+    const bookUrl = token && config.PUBLIC_API_BASE_URL ? `${config.PUBLIC_API_BASE_URL}/r/${token}` : null;
+    if (bookUrl) lines.push(`To book an appointment yourself right now: ${bookUrl}`);
   }
   return lines.join(" ");
 }
@@ -268,7 +284,7 @@ async function handleInboundMessage({ supabaseClient, nettuClient, twilioClient,
   if (!assistantModel || !entitlements.whatsappConversationalAi) {
     await classifyAndStoreTriage(supabaseClient, openaiClient, thread, body, log);
     if (!entitlements.whatsappStructuredBooking) return null;
-    const replyText = buildStructuredFallbackReply(clinic, thread);
+    const replyText = await buildStructuredFallbackReply(supabaseClient, clinic, patient, thread);
     await messagingSvc.recordOutboundAiMessage(supabaseClient, { clinicId: clinic.id, thread, body: replyText });
     return replyText;
   }
