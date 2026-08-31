@@ -124,7 +124,11 @@ function createApp({
     if (!claims || !config.PATIENT_APP_BASE_URL) {
       return response.status(404).send("This link has expired. Please message the clinic again for a fresh one.");
     }
-    response.redirect(302, `${config.PATIENT_APP_BASE_URL}/${claims.clinicId}/${encodeURIComponent(claims.phone)}`);
+    const doctorQuery = claims.doctorId ? `?doctor=${encodeURIComponent(claims.doctorId)}` : "";
+    response.redirect(
+      302,
+      `${config.PATIENT_APP_BASE_URL}/${claims.clinicId}/${encodeURIComponent(claims.phone)}${doctorQuery}`,
+    );
   });
 
   // Unconditional — no client/env var gates the API docs themselves.

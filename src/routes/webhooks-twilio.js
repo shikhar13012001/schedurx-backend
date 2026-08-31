@@ -39,7 +39,7 @@ const notificationSvc = require("../services/notification-service");
 const plansSvc = require("../lib/plans");
 const crypto = require("node:crypto");
 const { config } = require("../config");
-const { createRebookToken } = require("../lib/rebook-token");
+const { rebookLinkUrl } = require("../lib/rebook-token");
 
 const GREETING_BUCKET = "clinic-voice";
 
@@ -259,8 +259,7 @@ async function buildStructuredFallbackReply(supabaseClient, clinic, patient, thr
     // The old shape (.../clinicId/+91XXXXXXXXXX) was the same predictable
     // link shape for every patient, differing only by a guessable phone
     // number — this is a genuinely new, unguessable token each time.
-    const token = createRebookToken({ clinicId: clinic.id, phone: thread.contactPhone });
-    const bookUrl = token && config.PUBLIC_API_BASE_URL ? `${config.PUBLIC_API_BASE_URL}/r/${token}` : null;
+    const bookUrl = rebookLinkUrl({ clinicId: clinic.id, phone: thread.contactPhone });
     if (bookUrl) lines.push(`To book an appointment yourself right now: ${bookUrl}`);
   }
   return lines.join(" ");

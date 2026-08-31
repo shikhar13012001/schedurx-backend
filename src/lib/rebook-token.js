@@ -28,20 +28,26 @@ function base64url(buf) {
 }
 
 // Returns an opaque token string, or null if there's nothing to point it
-// at (no phone). clinicId + phone are the only claims — same capability
-// model as every other public route in this codebase (id + clinic
-// together), just delivered as a signed token instead of two plain path
-// segments.
-function createRebookToken({ clinicId, phone }) {
+// at (no phone). clinicId + phone are the required claims — same
+// capability model as every other public route in this codebase (id +
+// clinic together), just delivered as a signed token instead of two plain
+// path segments. doctorId is optional context, not a capability: when
+// present it lets the landing page skip straight to picking a new time
+// with the same doctor instead of showing a full doctor picker (used by
+// the doctor-blocked-time rebook notice, where we already know exactly
+// who the patient was trying to see).
+function createRebookToken({ clinicId, phone, doctorId }) {
   if (!clinicId || !phone) return null;
   const expiresAt = Date.now() + TOKEN_TTL_MS;
-  const payload = base64url(JSON.stringify({ clinicId, phone, expiresAt }));
+  const claims = { clinicId, phone, expiresAt };
+  if (doctorId) claims.doctorId = doctorId;
+  const payload = base64url(JSON.stringify(claims));
   const signature = base64url(crypto.createHmac("sha256", signingKey()).update(payload).digest());
   return `${payload}.${signature}`;
 }
 
-// Returns { clinicId, phone } if the token is validly signed and not
-// expired, otherwise null. Never throws — malformed input is expected
+// Returns { clinicId, phone, doctorId? } if the token is validly signed and
+// not expired, otherwise null. Never throws — malformed input is expected
 // (anyone can hit this endpoint with garbage) and should fail closed, not
 // crash the request.
 function verifyRebookToken(token) {
@@ -67,7 +73,17 @@ function verifyRebookToken(token) {
   }
   if (!claims?.clinicId || !claims?.phone || typeof claims.expiresAt !== "number") return null;
   if (Date.now() > claims.expiresAt) return null;
-  return { clinicId: claims.clinicId, phone: claims.phone };
+  return { clinicId: claims.clinicId, phone: claims.phone, doctorId: claims.doctorId };
 }
 
-module.exports = { createRebookToken, verifyRebookToken };
+// Convenience for the two call sites that just want a ready-to-send URL
+// rather than the bare token — folds token creation + the /r/:token path
+// together so PUBLIC_API_BASE_URL only has to be read in one place. Returns
+// null (never throws) if there's nothing to link to yet, same "quietly
+// omit the line" posture every other optional link in this codebase uses.
+function rebookLinkUrl({ clinicId, phone, doctorId }) {
+  const token = createRebookToken({ clinicId, phone, doctorId });
+  return token && config.PUBLIC_API_BASE_URL ? `${config.PUBLIC_API_BASE_URL}/r/${token}` : null;
+}
+
+module.exports = { createRebookToken, verifyRebookToken, rebookLinkUrl };

@@ -3029,7 +3029,32 @@ test("POST /webhooks/twilio/whatsapp-inbound: an ordinary message from a patient
 
   const { verifyRebookToken } = require("../../src/lib/rebook-token");
   const claims = verifyRebookToken(match[1]);
-  assert.deepEqual(claims, { clinicId: "clinic-1", phone: "+919888888899" });
+  assert.equal(claims.clinicId, "clinic-1");
+  assert.equal(claims.phone, "+919888888899");
+});
+
+test("GET /r/:token redirects to the patient app, carrying doctorId through as a query param when the token has one", async () => {
+  const { createRebookToken } = require("../../src/lib/rebook-token");
+  const app = createApp({ supabaseClient: createSupabaseStub(), nettuClient: null });
+
+  const withDoctor = createRebookToken({ clinicId: "clinic-1", phone: "+919888888899", doctorId: "doc-9" });
+  const withoutDoctor = createRebookToken({ clinicId: "clinic-1", phone: "+919888888899" });
+
+  await withServer(app, async ({ request }) => {
+    const redirected = await request(`/r/${withDoctor}`, { redirect: "manual" });
+    assert.equal(redirected.status, 302);
+    assert.equal(
+      redirected.headers.get("location"),
+      "https://book.schedurx.example/clinic-1/%2B919888888899?doctor=doc-9",
+    );
+
+    const noDoctorRedirect = await request(`/r/${withoutDoctor}`, { redirect: "manual" });
+    assert.equal(noDoctorRedirect.status, 302);
+    assert.equal(noDoctorRedirect.headers.get("location"), "https://book.schedurx.example/clinic-1/%2B919888888899");
+
+    const badToken = await request("/r/not-a-real-token", { redirect: "manual" });
+    assert.equal(badToken.status, 404);
+  });
 });
 
 test("POST /webhooks/twilio/whatsapp-inbound rejects a BOOKING deep link when the phone doesn't match the appointment's patient", async () => {

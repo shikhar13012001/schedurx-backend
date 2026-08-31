@@ -8,6 +8,7 @@ const { epochToISO, formatHumanTime, toDateString } = require("./availability-se
 const commsWorkflowSvc = require("./comms-workflow-service");
 const visitSvc = require("./visit-service");
 const { config } = require("../config");
+const { rebookLinkUrl } = require("../lib/rebook-token");
 
 // Same relative-path shape as routes/tool-helpers.js's formUrl() (used by the
 // voice-agent's /tools/appointments/send-form) — kept here rather than
@@ -15,16 +16,6 @@ const { config } = require("../config");
 // it's one line either way.
 function bookingUrlFor(clinicId, appointmentId) {
   return config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${appointmentId}` : undefined;
-}
-
-// Same phone-scoped link shape used everywhere else a patient needs a
-// self-serve rebooking entry point not tied to one specific (now-defunct)
-// appointment — webhooks-twilio.js's missed-call/self-service links,
-// tool-helpers.js's WhatsApp fallback. A cancelled appointment's own manage
-// page has nothing left to reschedule; this is the "pick any new slot"
-// door instead.
-function rebookUrlFor(clinicId, patientPhone) {
-  return config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${encodeURIComponent(patientPhone)}` : undefined;
 }
 
 // Direct, always-fires SMS for the one case an appointment disappears
@@ -46,7 +37,11 @@ async function sendDoctorUnavailableRebookNotice(supabaseClient, twilioClient, {
     if (!patient?.contactNumber) return;
 
     const oldTime = formatHumanTime(new Date(conflict.timeslot).getTime(), clinicRules.timezone);
-    const rebookUrl = rebookUrlFor(clinic.id, patient.contactNumber);
+    // Carries doctorId so the landing page (schedurx-form-agent's intake
+    // wizard) skips the doctor picker and goes straight to "pick a new
+    // time with this doctor" — we already know exactly who the patient
+    // was trying to see, no reason to make them choose again.
+    const rebookUrl = rebookLinkUrl({ clinicId: clinic.id, phone: patient.contactNumber, doctorId: doctor?.id });
     const firstName = (patient.fullName ?? "there").split(" ")[0];
     const body = rebookUrl
       ? `Hi ${firstName}, ${doctor?.fullName ?? "your doctor"} at ${clinic.name} is no longer available for your ${oldTime} appointment and it's been cancelled. Please pick a new time here: ${rebookUrl}`
