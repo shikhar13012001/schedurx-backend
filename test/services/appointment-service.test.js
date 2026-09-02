@@ -1,6 +1,11 @@
 const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 
+// Set before appointment-service.js (and, transitively, config.js) is first
+// required below — config.js reads process.env once via dotenv.config(),
+// which never overwrites a var already set, so this must land first.
+process.env.TWILIO_DOCTOR_UNAVAILABLE_CONTENT_SID = "HXaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 const {
   bookAppointment,
   rescheduleAppointment,
@@ -361,6 +366,107 @@ describe("bookAppointment", () => {
 
     const conflictRow = supabaseClient._tables.Appointment.find((a) => a.id === "apt_conflict");
     assert.equal(conflictRow.status, "cancelled");
+  });
+
+  test("blocking time over an existing booking prefers the approved WhatsApp template over SMS when the clinic has a WhatsApp number", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [
+        {
+          id: "clinic-1", status: "active", name: "Nirmaya Clinic", phone: "+919999999999",
+          whatsappFrom: "+19789069398",
+          schedulerServiceId: "svc-001", timezone: "Asia/Kolkata", openingHour: 9, closingHour: 18,
+          minNoticeHours: 0, maxBookingWindowDays: 30, cancellationCutoffHours: 0,
+        },
+      ],
+      Doctor: [
+        {
+          id: "doc-priya-001", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true,
+          schedulerDoctorId: "nettu-user-001", schedulerCalendarId: "nettu-cal-001",
+          workingHoursStart: "09:00", workingHoursEnd: "18:00",
+        },
+      ],
+      Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+      Appointment: [
+        {
+          id: "apt_conflict", clinicId: "clinic-1", doctorId: "doc-priya-001", patientId: "pat-1",
+          timeslot: FUTURE_START, durationMinutes: 30, status: "booked", auditHistory: [],
+        },
+      ],
+    });
+    const twilioClient = createTwilioStub();
+
+    await bookAppointment(
+      makeNettu(),
+      supabaseClient,
+      {
+        clinicId: "clinic-1",
+        doctorId: "doc-priya-001",
+        start: FUTURE_START,
+        end: new Date(new Date(FUTURE_START).getTime() + 2 * 60 * 60 * 1000).toISOString(),
+        status: "blocked",
+        source: "reception",
+      },
+      null,
+      twilioClient,
+    );
+
+    assert.equal(twilioClient.calls.sendSms.filter((c) => c.purpose === "doctor_unavailable_rebook").length, 0);
+    const waSend = twilioClient.calls.sendWhatsApp.find((c) => c.purpose === "doctor_unavailable_rebook");
+    assert.ok(waSend, "expected a WhatsApp template send");
+    assert.equal(waSend.to, "+919888888888");
+    assert.equal(waSend.contentSid, "HXaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert.equal(waSend.contentVariables[1], "Rahul Sharma");
+    assert.equal(waSend.contentVariables[2], "Dr. Priya at Nirmaya Clinic");
+    assert.ok(waSend.contentVariables[4], "expected a bare rebook token in variable 4");
+    assert.doesNotMatch(String(waSend.contentVariables[4]), /http/, "variable 4 should be the bare token, not a full URL");
+  });
+
+  test("falls back to SMS when the approved WhatsApp template send itself fails", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [
+        {
+          id: "clinic-1", status: "active", name: "Nirmaya Clinic", phone: "+919999999999",
+          whatsappFrom: "+19789069398",
+          schedulerServiceId: "svc-001", timezone: "Asia/Kolkata", openingHour: 9, closingHour: 18,
+          minNoticeHours: 0, maxBookingWindowDays: 30, cancellationCutoffHours: 0,
+        },
+      ],
+      Doctor: [
+        {
+          id: "doc-priya-001", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true,
+          schedulerDoctorId: "nettu-user-001", schedulerCalendarId: "nettu-cal-001",
+          workingHoursStart: "09:00", workingHoursEnd: "18:00",
+        },
+      ],
+      Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+      Appointment: [
+        {
+          id: "apt_conflict", clinicId: "clinic-1", doctorId: "doc-priya-001", patientId: "pat-1",
+          timeslot: FUTURE_START, durationMinutes: 30, status: "booked", auditHistory: [],
+        },
+      ],
+    });
+    const twilioClient = createTwilioStub({ shouldFailWhatsApp: true });
+
+    await bookAppointment(
+      makeNettu(),
+      supabaseClient,
+      {
+        clinicId: "clinic-1",
+        doctorId: "doc-priya-001",
+        start: FUTURE_START,
+        end: new Date(new Date(FUTURE_START).getTime() + 2 * 60 * 60 * 1000).toISOString(),
+        status: "blocked",
+        source: "reception",
+      },
+      null,
+      twilioClient,
+    );
+
+    assert.equal(twilioClient.calls.sendWhatsApp.length, 1, "should still attempt WhatsApp first");
+    const smsSend = twilioClient.calls.sendSms.find((c) => c.purpose === "doctor_unavailable_rebook");
+    assert.ok(smsSend, "expected the SMS fallback after the WhatsApp send failed");
+    assert.equal(smsSend.to, "+919888888888");
   });
 
   test("throws SLOT_NOT_AVAILABLE on 409 from nettu", async () => {

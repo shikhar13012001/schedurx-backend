@@ -115,6 +115,19 @@ const schema = z.object({
       .regex(/^HX[a-fA-F0-9]{32}$/)
       .optional(),
   ),
+  // Optional Meta-approved Content Template ("doctor_unavailable_reschedule_v1")
+  // for the doctor-blocked-time rebook notice — see appointment-service.js's
+  // sendDoctorUnavailableRebookNotice. Without it, that notice always sends
+  // plain SMS (which needs no template approval and keeps working
+  // unconditionally); set this once the template's approved to prefer
+  // WhatsApp instead, with SMS as the automatic fallback.
+  TWILIO_DOCTOR_UNAVAILABLE_CONTENT_SID: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z
+      .string()
+      .regex(/^HX[a-fA-F0-9]{32}$/)
+      .optional(),
+  ),
 
   // ── ElevenLabs (voice synthesis) — Ask ScheduRx speaks its replies aloud,
   // and the missed-call greeting upgrades from Twilio's built-in <Say> voice

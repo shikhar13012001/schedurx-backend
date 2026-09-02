@@ -8,7 +8,7 @@ const { epochToISO, formatHumanTime, toDateString } = require("./availability-se
 const commsWorkflowSvc = require("./comms-workflow-service");
 const visitSvc = require("./visit-service");
 const { config } = require("../config");
-const { rebookLinkUrl } = require("../lib/rebook-token");
+const { createRebookToken, rebookLinkUrl } = require("../lib/rebook-token");
 
 // Same relative-path shape as routes/tool-helpers.js's formUrl() (used by the
 // voice-agent's /tools/appointments/send-form) — kept here rather than
@@ -18,14 +18,22 @@ function bookingUrlFor(clinicId, appointmentId) {
   return config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${appointmentId}` : undefined;
 }
 
-// Direct, always-fires SMS for the one case an appointment disappears
-// through no fault of the patient's — the doctor blocking that exact time.
-// Deliberately bypasses the configurable communication-workflow system
+// Always-fires notice for the one case an appointment disappears through no
+// fault of the patient's — the doctor blocking that exact time. Deliberately
+// bypasses the configurable communication-workflow system
 // (clinic.settings.communication) that every other trigger in this file
-// goes through, and deliberately uses SMS rather than a WhatsApp Content
-// Template — see the call site's comment for why both of those are
-// intentional, not oversights. Never throws — a failure here must not
+// goes through — losing a slot to the doctor's own unavailability isn't
+// optional/marketing-style communication, so this fires unconditionally
+// rather than being toggleable off. Never throws — a failure here must not
 // undo or fail the block/cancel that already genuinely happened.
+//
+// Prefers the Meta-approved "doctor_unavailable_reschedule_v1" WhatsApp
+// Content Template (TWILIO_DOCTOR_UNAVAILABLE_CONTENT_SID) when the clinic
+// has a WhatsApp number configured, since a template renders as a proper
+// templated message rather than a plain SMS. Falls back to SMS — which
+// needs no template approval and so has kept working since the very first
+// version of this function — whenever the template isn't configured, the
+// clinic has no WhatsApp number, or the WhatsApp send itself fails.
 async function sendDoctorUnavailableRebookNotice(supabaseClient, twilioClient, { clinic, clinicRules, conflict, doctor }, log) {
   if (!twilioClient || !conflict.patientId) return;
   try {
@@ -41,7 +49,30 @@ async function sendDoctorUnavailableRebookNotice(supabaseClient, twilioClient, {
     // wizard) skips the doctor picker and goes straight to "pick a new
     // time with this doctor" — we already know exactly who the patient
     // was trying to see, no reason to make them choose again.
+    const token = createRebookToken({ clinicId: clinic.id, phone: patient.contactNumber, doctorId: doctor?.id });
     const rebookUrl = rebookLinkUrl({ clinicId: clinic.id, phone: patient.contactNumber, doctorId: doctor?.id });
+
+    if (config.TWILIO_DOCTOR_UNAVAILABLE_CONTENT_SID && clinic.whatsappFrom && token) {
+      try {
+        await twilioClient.sendWhatsApp({
+          to: patient.contactNumber,
+          from: clinic.whatsappFrom,
+          contentSid: config.TWILIO_DOCTOR_UNAVAILABLE_CONTENT_SID,
+          contentVariables: {
+            1: patient.fullName || "there",
+            2: doctor?.fullName ? `${doctor.fullName} at ${clinic.name}` : clinic.name,
+            3: oldTime,
+            4: token,
+          },
+          clinicId: clinic.id,
+          purpose: "doctor_unavailable_rebook",
+        });
+        return;
+      } catch (err) {
+        log?.warn({ err, appointmentId: conflict.id }, "[appointmentSvc] WhatsApp rebook notice failed, falling back to SMS");
+      }
+    }
+
     const firstName = (patient.fullName ?? "there").split(" ")[0];
     const body = rebookUrl
       ? `Hi ${firstName}, ${doctor?.fullName ?? "your doctor"} at ${clinic.name} is no longer available for your ${oldTime} appointment and it's been cancelled. Please pick a new time here: ${rebookUrl}`
