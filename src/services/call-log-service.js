@@ -90,6 +90,46 @@ async function upsertByTwilioCallSid(
   });
 }
 
+// Called by missed-call-service.js (Android companion app path). Idempotent
+// against the (clinicId, phone, deviceCallTimestamp) unique index (see
+// 20260904_device_missed_calls.sql) — deviceCallTimestamp is the device's own
+// CallLog.Calls.DATE (epoch ms), stable across a WorkManager retry or a
+// BroadcastReceiver double-fire for the same call, unlike the Twilio path's
+// twilioCallSid (that call never happens twice at the protocol level the way
+// a receiver can double-deliver). Returns null on a duplicate rather than
+// throwing — the caller (a duplicate report) is a routine no-op, not an error.
+async function createDeviceCallLog(
+  supabaseClient,
+  { clinicId, staffId, patientId, phone, durationSec, outcome, deviceCallTimestamp },
+) {
+  const { data: row, error } = await supabaseClient
+    .from("CallLog")
+    .insert({
+      id: makeId("call"),
+      clinicId,
+      patientId: patientId ?? null,
+      phone,
+      staffId: staffId ?? null,
+      durationSec: durationSec ?? 0,
+      outcome: outcome ?? "info",
+      source: "android_native",
+      deviceCallTimestamp,
+      createdAt: new Date().toISOString(),
+    })
+    .select()
+    .single();
+  if (error) {
+    if (/duplicate|unique/i.test(error.message ?? "")) return null;
+    throw dbErr(`creating device call log: ${error.message}`);
+  }
+  return row;
+}
+
+async function updateCallLogOutcome(supabaseClient, id, outcome) {
+  const { error } = await supabaseClient.from("CallLog").update({ outcome }).eq("id", id);
+  if (error) throw dbErr(`updating call log outcome: ${error.message}`);
+}
+
 async function listWaLogs(supabaseClient, clinicId, { limit = 50 } = {}) {
   const { data, error } = await supabaseClient
     .from("WaLog")
@@ -101,4 +141,11 @@ async function listWaLogs(supabaseClient, clinicId, { limit = 50 } = {}) {
   return data ?? [];
 }
 
-module.exports = { listCallLogs, createCallLog, upsertByTwilioCallSid, listWaLogs };
+module.exports = {
+  listCallLogs,
+  createCallLog,
+  upsertByTwilioCallSid,
+  createDeviceCallLog,
+  updateCallLogOutcome,
+  listWaLogs,
+};

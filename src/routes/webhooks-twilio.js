@@ -30,6 +30,7 @@ const { renderTemplate } = require("../lib/template");
 const clinicSvc = require("../services/clinic-service");
 const phoneRouteSvc = require("../services/phone-route-service");
 const callLogSvc = require("../services/call-log-service");
+const commsWorkflowSvc = require("../services/comms-workflow-service");
 const messagingSvc = require("../services/messaging-service");
 const messageLogSvc = require("../services/message-log-service");
 const tableSvc = require("../services/table-service");
@@ -399,7 +400,7 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
       // up" status should trigger a follow-up — not every intermediate
       // ringing/in-progress callback Twilio sends for the same call.
       if (callStatus === "completed") {
-        await triggerMissedCallFollowup(supabaseClient, twilioClient, clinicId, req.body?.From, req.log);
+        await commsWorkflowSvc.sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, req.body?.From, req.log);
       }
 
       res.sendStatus(200);
@@ -560,53 +561,6 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
   });
 
   return router;
-}
-
-// Zero-delay only (slice 1 scope) — sends synchronously once the call is
-// confirmed ended. A clinic that wants a delayed follow-up instead configures
-// a workflow with a non-zero offset, handled once comms-workflow-service
-// (slice 2) lands and rides the same lightweight nettu carrier-event pattern
-// built for task reminders.
-async function triggerMissedCallFollowup(supabaseClient, twilioClient, clinicId, callerPhone, log) {
-  if (!callerPhone) return;
-
-  const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
-  const comms = clinic?.settings?.communication ?? {};
-  const channelsEnabled = comms.channelsEnabled ?? [];
-  const workflow = (comms.workflows ?? []).find(
-    (w) => w.enabled && w.trigger === "missed_call_followup" && (!w.offsetMinutes || w.offsetMinutes === 0),
-  );
-  if (!workflow || !channelsEnabled.includes(workflow.channel)) return;
-
-  const from = workflow.channel === "whatsapp" ? clinic?.whatsappFrom : null;
-  // Unlike booking_confirmed/reschedule's {{bookingUrl}} (an existing
-  // appointment's manage link), there's no appointment yet here — this
-  // points at the pre-booking entry point instead (the same
-  // /{clinicId}/{phone} route schedurx-form-agent's IntakeForm already
-  // handles), pre-filling the caller's own number.
-  const bookingUrl = config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${encodeURIComponent(callerPhone)}` : undefined;
-  // Suffix-only form for Content Template URL buttons — see bookingUrlPath in
-  // appointment-service.js for why the button variant can't just reuse bookingUrl.
-  const bookingUrlPath = `${clinicId}/${encodeURIComponent(callerPhone)}`;
-  try {
-    await messagingSvc.sendTemplatedMessage(
-      {
-        twilioClient,
-        channel: workflow.channel,
-        toPhone: callerPhone,
-        from,
-        template: workflow.template,
-        contentSid: workflow.contentSid,
-        contentVariables: workflow.contentVariables,
-        data: { clinicName: clinic?.name, clinicPhone: clinic?.phone, bookingUrl, bookingUrlPath },
-        clinicId,
-        purpose: "missed_call_followup",
-      },
-      log,
-    );
-  } catch (err) {
-    log?.error({ err, clinicId, workflowId: workflow.id }, "[webhooks:twilio] missed-call follow-up send failed");
-  }
 }
 
 module.exports = { createTwilioWebhookRouter };

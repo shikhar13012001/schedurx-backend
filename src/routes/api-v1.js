@@ -26,6 +26,8 @@ const { createApiV1BillingRouter } = require("./api-v1-billing");
 const { createApiV1AiRouter } = require("./api-v1-ai");
 const { createApiV1AssistantRouter } = require("./api-v1-assistant");
 const { createApiV1CallLogsRouter } = require("./api-v1-call-logs");
+const { createApiV1DeviceCallsRouter } = require("./api-v1-device-calls");
+const { createApiV1CallerWhitelistRouter } = require("./api-v1-caller-whitelist");
 const { createApiV1WaLogsRouter } = require("./api-v1-wa-logs");
 const { createApiV1MediaRouter } = require("./api-v1-media");
 const { createApiV1OnboardingRouter } = require("./api-v1-onboarding");
@@ -64,6 +66,8 @@ function createApiV1Router({
   router.use("/push-subscriptions", createApiV1PushSubscriptionsRouter(supabaseClient));
   router.use("/analytics", createApiV1AnalyticsRouter(supabaseClient, openaiClient));
   router.use("/call-logs", createApiV1CallLogsRouter(supabaseClient));
+  router.use("/device-calls", createApiV1DeviceCallsRouter(supabaseClient, twilioClient));
+  router.use("/caller-whitelist", createApiV1CallerWhitelistRouter(supabaseClient));
   router.use("/wa-logs", createApiV1WaLogsRouter(supabaseClient));
   router.use("/onboarding", createApiV1OnboardingRouter(supabaseClient));
   router.use("/messaging", createApiV1MessagingRouter(supabaseClient));

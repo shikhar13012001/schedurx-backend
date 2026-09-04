@@ -1830,6 +1830,96 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ApiV1Error" }
 
+  # ── /api/v1/device-calls ────────────────────────────────────────────────────────
+  /api/v1/device-calls:
+    post:
+      summary: >-
+        Report a missed call read directly off a staff phone's native call log
+        (the Android companion app's safety-net path, alongside the Twilio
+        carrier-forwarding one) — auto-creates/matches a Patient and fires the
+        clinic's missed_call_followup workflow, same as a forwarded call would.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, deviceCallTimestamp]
+              properties:
+                phone: { type: string, description: The caller's number, as read off the device call log. }
+                deviceCallTimestamp: { type: integer, description: The device's own CallLog.Calls.DATE (epoch ms) — used for idempotency against retries/double-fires. }
+      responses:
+        "201":
+          description: Recorded (or recognized as a duplicate report of an already-processed call).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "422":
+          description: phone/deviceCallTimestamp missing, or phone isn't a valid Indian mobile number.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  # ── /api/v1/caller-whitelist ────────────────────────────────────────────────────
+  /api/v1/caller-whitelist:
+    get:
+      summary: >-
+        List numbers that should still be reported as a missed call even
+        though they resolve to a saved contact on the device (clinic-wide
+        policy, not per-staff).
+      security: [{ FirebaseBearerAuth: [] }]
+      responses:
+        "200":
+          description: Whitelist entries.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+    post:
+      summary: Add a number to the missed-call whitelist. Owner or receptionist.
+      security: [{ FirebaseBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string }
+                label: { type: [string, "null"], description: Optional display name, e.g. "Dr. Rao's clinic". }
+      responses:
+        "201":
+          description: Whitelist entry created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Success" }
+        "409":
+          description: This number is already on the whitelist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+        "403":
+          description: Caller's role is neither 'owner' nor 'receptionist'.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
+  /api/v1/caller-whitelist/{id}:
+    delete:
+      summary: Remove a number from the missed-call whitelist. Owner or receptionist.
+      security: [{ FirebaseBearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204":
+          description: Deleted.
+        "403":
+          description: Caller's role is neither 'owner' nor 'receptionist'.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiV1Error" }
+
   # ── /api/v1/notifications (item-level) ────────────────────────────────────────
   /api/v1/notifications/{id}/read:
     patch:
