@@ -2,6 +2,8 @@
 // from Appointment.auditHistory, which only logs booking/scheduling events.
 
 const { makeId } = require("../lib/ids");
+const messagingSvc = require("./messaging-service");
+const tableSvc = require("./table-service");
 
 function dbErr(msg) {
   return Object.assign(new Error(`DB error ${msg}`), { code: "DATABASE_ERROR", statusCode: 500 });
@@ -143,6 +145,18 @@ async function updateVisit(supabaseClient, clinicId, visitId, patch) {
   return data;
 }
 
+async function getVisit(supabaseClient, clinicId, visitId) {
+  const { data, error } = await supabaseClient
+    .from("Visit")
+    .select("*")
+    .eq("id", visitId)
+    .eq("clinicId", clinicId)
+    .maybeSingle();
+  if (error) throw dbErr(`fetching visit: ${error.message}`);
+  if (!data) throw Object.assign(new Error(`Visit '${visitId}' not found`), { code: "VISIT_NOT_FOUND", statusCode: 404 });
+  return data;
+}
+
 const RX_BUCKET = "rx-attachments";
 
 // Browser uploads bytes directly to Supabase Storage using this signed URL —
@@ -207,6 +221,77 @@ async function saveAudioAttachment(supabaseClient, clinicId, visitId, buffer, co
   return addAttachment(supabaseClient, clinicId, visitId, { path, type: "audio" });
 }
 
+// Marks one attachment (by path — the array has no other stable id) as sent,
+// so a caller can safely auto-send a photo Rx exactly once on checkout
+// without re-sending it every time a visit is touched again. A no-op (still
+// returns the visit unchanged) if no attachment matches the given path,
+// rather than throwing — the caller either just sent something that must
+// have existed a moment ago, or is racing a concurrent edit; either way
+// silently doing nothing to a stale path is safer than erroring the send
+// that already genuinely happened.
+async function markAttachmentSent(supabaseClient, clinicId, visitId, path) {
+  const visit = await getVisit(supabaseClient, clinicId, visitId);
+  const rxAttachments = (visit.rxAttachments ?? []).map((a) =>
+    a.path === path ? { ...a, sentAt: new Date().toISOString() } : a,
+  );
+  const { data, error } = await supabaseClient
+    .from("Visit")
+    .update({ rxAttachments, updatedAt: new Date().toISOString() })
+    .eq("id", visitId)
+    .eq("clinicId", clinicId)
+    .select()
+    .maybeSingle();
+  if (error) throw dbErr(`marking attachment sent: ${error.message}`);
+  return data;
+}
+
+// Sends a signed link to an already-uploaded Rx attachment over
+// WhatsApp/SMS and marks it sent — the one real send implementation shared
+// by the doctor's explicit "Send to WhatsApp" button (api-v1-visits.js) and
+// checkout's best-effort auto-send for an unsent photo Rx
+// (queue-service.js's "complete" direction). Centralizing it here, rather
+// than in the route, is what lets a non-HTTP caller (queue-service.js) use
+// the exact same logic instead of a second copy.
+async function sendAttachment(supabaseClient, twilioClient, { clinicId, visitId, path, staffId, staffContext }, log) {
+  if (!twilioClient) {
+    throw Object.assign(new Error("Messaging is not configured for this deployment"), {
+      code: "MESSAGING_NOT_CONFIGURED",
+      statusCode: 503,
+    });
+  }
+
+  const visit = await getVisit(supabaseClient, clinicId, visitId);
+  const attachment = (visit.rxAttachments ?? []).find((a) => a.path === path);
+  if (!attachment) {
+    throw Object.assign(new Error(`No attachment at path '${path}' on this visit`), {
+      code: "ATTACHMENT_NOT_FOUND",
+      statusCode: 404,
+    });
+  }
+  if (!visit.patientId) {
+    throw Object.assign(new Error("This visit has no linked patient to message"), { code: "NO_PATIENT", statusCode: 422 });
+  }
+
+  const patient = await tableSvc.getPatientById(supabaseClient, clinicId, visit.patientId);
+  if (!patient?.contactNumber) {
+    throw Object.assign(new Error("This patient has no phone number on file"), { code: "MISSING_PHONE", statusCode: 422 });
+  }
+
+  const url = await createReadUrl(supabaseClient, path);
+  const firstName = (patient.fullName ?? "there").split(" ")[0];
+  const label = attachment.type === "digital" ? "prescription" : "prescription photo";
+  const body = `Hi ${firstName}, here's your ${label}: ${url}`;
+
+  const thread = await messagingSvc.findOrCreateThread(supabaseClient, {
+    clinicId,
+    patientId: patient.id,
+    contactPhone: patient.contactNumber,
+  });
+  await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body, staffContext }, log, twilioClient);
+
+  return markAttachmentSent(supabaseClient, clinicId, visitId, path);
+}
+
 // Short-lived read URL for a private-bucket attachment path.
 async function createReadUrl(supabaseClient, path) {
   const { data, error } = await supabaseClient.storage.from(RX_BUCKET).createSignedUrl(path, 60 * 10);
@@ -219,8 +304,11 @@ module.exports = {
   createVisit,
   findOrCreateTodaysVisit,
   updateVisit,
+  getVisit,
   createUploadUrl,
   addAttachment,
+  markAttachmentSent,
+  sendAttachment,
   saveAudioAttachment,
   createReadUrl,
 };

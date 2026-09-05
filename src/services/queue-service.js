@@ -4,6 +4,7 @@
 
 const { makeId } = require("../lib/ids");
 const appointmentSvc = require("./appointment-service");
+const visitSvc = require("./visit-service");
 
 // How long staff has, past a booking's start time, before it's surfaced as
 // a *possible* no-show (never auto-finalized — see markNoShow in
@@ -144,10 +145,59 @@ async function setStatus(supabaseClient, id, patch) {
   return data;
 }
 
-// direction: "next" | "prev" | "jumpTo" (jumpTo requires targetId)
+// direction: "next" | "prev" | "jumpTo" | "complete" (jumpTo requires targetId)
 async function advance(supabaseClient, { clinicId, doctorId, direction, targetId }, log, twilioClient) {
   const now = new Date().toISOString();
   const current = await getCurrentInRoom(supabaseClient, clinicId, doctorId);
+
+  // "Checkout" — marks the visit complete but deliberately does NOT touch
+  // QueueItem.status or promote the next waiting patient. Live-reported bug
+  // (2026-09-02): Checkout used to call the same path as "next", so it also
+  // silently advanced the queue — the doctor lost the current patient off
+  // their screen the instant they tapped Checkout, before ever meaning to
+  // move on. Deliberately not flipping status to "done" here either: doing
+  // so would drop this item out of activeQueue()'s filter, and
+  // useCurrentPatient's "in_room ?? first active" fallback would then show
+  // the *next* patient as current as a side effect — exactly the behavior
+  // this exists to prevent. markCompleted is idempotent, so the "next"
+  // branch below still runs safely (no duplicate thank-you message) once
+  // the doctor actually taps '>'.
+  if (direction === "complete") {
+    if (!current) {
+      throw Object.assign(new Error("No patient currently in room"), { code: "NO_CURRENT_PATIENT", statusCode: 422 });
+    }
+    if (current.appointmentId) {
+      await appointmentSvc.markCompleted(supabaseClient, { appointmentId: current.appointmentId, clinicId }, log, twilioClient);
+    }
+    // Best-effort, never blocks checkout — markCompleted (above) already
+    // guarantees today's Visit row exists once a real appointment is
+    // linked. If the doctor attached a photo Rx during the consult but
+    // never explicitly sent it, send it now rather than leaving it sitting
+    // unsent until someone remembers to open the patient file.
+    if (current.patientId) {
+      try {
+        const visit = await visitSvc.findOrCreateTodaysVisit(supabaseClient, {
+          clinicId,
+          patientId: current.patientId,
+          doctorId,
+          appointmentId: current.appointmentId,
+        });
+        const unsentPhoto = (visit.rxAttachments ?? []).find((a) => a.type === "photo" && !a.sentAt);
+        if (unsentPhoto) {
+          await visitSvc.sendAttachment(supabaseClient, twilioClient, {
+            clinicId,
+            visitId: visit.id,
+            path: unsentPhoto.path,
+            staffId: null,
+            staffContext: null,
+          }, log);
+        }
+      } catch (err) {
+        log?.warn({ err, patientId: current.patientId }, "[queueSvc] couldn't auto-send the photo Rx on checkout");
+      }
+    }
+    return { nowServing: current };
+  }
 
   if (direction === "jumpTo") {
     if (!targetId)

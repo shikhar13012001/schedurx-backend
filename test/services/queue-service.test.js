@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const { listQueue, addWalkIn, advance, listPossibleNoShows } = require("../../src/services/queue-service");
 const { createTableStub } = require("../helpers/supabase-table-stub");
+const { createTwilioStub } = require("../helpers/twilio-stub");
 
 describe("addWalkIn", () => {
   test("a genuine walk-in (no appointmentId) is tagged walkIn:true, as before", async () => {
@@ -108,6 +109,127 @@ describe("advance — syncing the linked appointment", () => {
     const { nowServing } = await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "next" });
     assert.equal(nowServing, null);
     assert.equal(supabaseClient._tables.QueueItem[0].status, "done");
+  });
+
+  // Regression coverage for a live-reported bug (2026-09-02): Checkout used
+  // to call the exact same path as the ">" button, so it silently advanced
+  // the queue to the next patient too. "complete" is the fix — it must mark
+  // the appointment done WITHOUT touching QueueItem.status, or the doctor
+  // loses the current patient off their screen (see queue-service.js's own
+  // comment on this branch for the full "why").
+  test("'complete' marks the linked appointment completed but leaves the QueueItem status untouched (still in_room)", async () => {
+    const supabaseClient = seed();
+    const { nowServing } = await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" });
+    assert.equal(supabaseClient._tables.Appointment[0].status, "completed");
+    assert.equal(supabaseClient._tables.QueueItem[0].status, "in_room");
+    assert.equal(nowServing.id, "q_1");
+    assert.equal(nowServing.status, "in_room");
+  });
+
+  test("'complete' still works for a queue entry with no linked appointment (a real walk-in) without touching QueueItem status", async () => {
+    const supabaseClient = createTableStub({
+      QueueItem: [{ id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: null, status: "in_room", position: 1 }],
+    });
+    const { nowServing } = await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" });
+    assert.equal(nowServing.id, "q_1");
+    assert.equal(supabaseClient._tables.QueueItem[0].status, "in_room");
+  });
+
+  test("'complete' throws NO_CURRENT_PATIENT when nobody is in_room", async () => {
+    const supabaseClient = createTableStub({ QueueItem: [] });
+    await assert.rejects(
+      () => advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" }),
+      (err) => { assert.equal(err.code, "NO_CURRENT_PATIENT"); return true; },
+    );
+  });
+
+  test("'complete' followed by a real 'next' ends in the same state as calling 'next' alone once — no double-processing", async () => {
+    const supabaseClient = seed();
+    await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" });
+    // markCompleted is idempotent (see appointment-service.test.js) — this
+    // second, real completion (from tapping '>') must be a safe no-op, not
+    // a duplicate thank-you send or an audit-history double-entry.
+    await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "next" });
+    assert.equal(supabaseClient._tables.QueueItem[0].status, "done");
+    assert.equal(supabaseClient._tables.Appointment[0].status, "completed");
+    assert.equal(supabaseClient._tables.Appointment[0].auditHistory.filter((e) => e.action === "completed").length, 1);
+  });
+
+  test("'complete' auto-sends an unsent photo Rx attachment for today's visit, best-effort", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+      Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+      Appointment: [{ id: "apt_1", clinicId: "clinic-1", status: "booked", auditHistory: [] }],
+      Visit: [
+        {
+          id: "visit_1", clinicId: "clinic-1", patientId: "pat-1",
+          visitDate: new Date().toISOString().slice(0, 10),
+          rxAttachments: [{ path: "clinic-1/visit_1/rx.jpg", type: "photo", uploadedAt: new Date().toISOString() }],
+        },
+      ],
+      QueueItem: [
+        {
+          id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", appointmentId: "apt_1",
+          status: "in_room", position: 1,
+        },
+      ],
+    });
+    const twilioClient = createTwilioStub();
+    await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" }, null, twilioClient);
+
+    const sent = twilioClient.calls.sendWhatsApp.find((c) => c.to === "+919888888888");
+    assert.ok(sent, "expected the unsent photo Rx to be auto-sent on checkout");
+    const visitRow = supabaseClient._tables.Visit.find((v) => v.id === "visit_1");
+    assert.ok(visitRow.rxAttachments[0].sentAt, "expected the attachment to be marked sent");
+  });
+
+  test("'complete' does not re-send a photo Rx that's already been sent", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+      Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+      Appointment: [{ id: "apt_1", clinicId: "clinic-1", status: "booked", auditHistory: [] }],
+      Visit: [
+        {
+          id: "visit_1", clinicId: "clinic-1", patientId: "pat-1",
+          visitDate: new Date().toISOString().slice(0, 10),
+          rxAttachments: [{ path: "clinic-1/visit_1/rx.jpg", type: "photo", uploadedAt: new Date().toISOString(), sentAt: new Date().toISOString() }],
+        },
+      ],
+      QueueItem: [
+        {
+          id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", appointmentId: "apt_1",
+          status: "in_room", position: 1,
+        },
+      ],
+    });
+    const twilioClient = createTwilioStub();
+    await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" }, null, twilioClient);
+    assert.equal(twilioClient.calls.sendWhatsApp.length, 0);
+  });
+
+  test("'complete' doesn't fail checkout when the auto-send itself fails (best-effort)", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+      Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+      Appointment: [{ id: "apt_1", clinicId: "clinic-1", status: "booked", auditHistory: [] }],
+      Visit: [
+        {
+          id: "visit_1", clinicId: "clinic-1", patientId: "pat-1",
+          visitDate: new Date().toISOString().slice(0, 10),
+          rxAttachments: [{ path: "clinic-1/visit_1/rx.jpg", type: "photo", uploadedAt: new Date().toISOString() }],
+        },
+      ],
+      QueueItem: [
+        {
+          id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", appointmentId: "apt_1",
+          status: "in_room", position: 1,
+        },
+      ],
+    });
+    const twilioClient = createTwilioStub({ shouldFailWhatsApp: true });
+    const { nowServing } = await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" }, null, twilioClient);
+    assert.equal(nowServing.id, "q_1");
+    assert.equal(supabaseClient._tables.Appointment.find((a) => a.id === "apt_1").status, "completed");
   });
 
   test("'prev' reverts a resurrected done entry's appointment back to booked", async () => {

@@ -263,10 +263,42 @@ function createApiV1AppointmentsRouter(supabaseClient, nettuClient, twilioClient
           source: "reception",
         },
         req.log,
+        twilioClient,
       );
       return res.status(201).json({ success: true, data: { appointment }, message: null });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:appointments] block failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
+  // POST /api/v1/appointments/reorder-day — the doctor-facing "manage
+  // today's appointments" drag-and-drop screen. This REALLY reschedules
+  // every appointment whose time changes as a result of the new order (real
+  // nettu sync, real overlap check, real "your appointment time changed"
+  // patient notification) — see reorderDayAppointments's own comment for
+  // why this can't be a purely visual reorder.
+  router.post("/reorder-day", async (req, res) => {
+    if (!nettuClient) {
+      return fail(res, 503, "SCHEDULER_NOT_CONFIGURED", "Calendar scheduling is not configured");
+    }
+
+    const { doctorId, date, orderedAppointmentIds } = req.body ?? {};
+    if (!doctorId || !date || !Array.isArray(orderedAppointmentIds)) {
+      return fail(res, 422, "MISSING_FIELDS", "doctorId, date, and orderedAppointmentIds are required");
+    }
+
+    try {
+      const result = await appointmentSvc.reorderDayAppointments(
+        nettuClient,
+        supabaseClient,
+        { clinicId: req.staff.clinicId, doctorId, date, orderedAppointmentIds },
+        req.log,
+        twilioClient,
+      );
+      return ok(res, result);
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:appointments] reorder-day failed");
       return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
     }
   });

@@ -3,7 +3,7 @@ const { ok, fail } = require("../lib/response-envelope");
 const visitSvc = require("../services/visit-service");
 const openaiSvc = require("../services/openai-service");
 
-function createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient) {
+function createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient, twilioClient) {
   const router = Router();
 
   // GET /api/v1/visits/scribe-token — mints a 15-minute single-use
@@ -88,6 +88,36 @@ function createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient)
       return res.status(201).json({ success: true, data: { visit }, message: null });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:visits] add attachment failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
+  // POST /api/v1/visits/:id/attachments/send — sends a signed link to an
+  // already-uploaded Rx attachment over WhatsApp/SMS, and marks it sent.
+  // The one place this actually sends anything (both the doctor's "Send to
+  // WhatsApp" button and checkout's auto-send for a photo Rx call this same
+  // endpoint) — previously the generated-PDF flow built this send inline in
+  // the frontend and the photo-upload flow had no send action at all.
+  router.post("/:id/attachments/send", async (req, res) => {
+    const { path } = req.body ?? {};
+    if (!path) return fail(res, 422, "MISSING_FIELDS", "path is required");
+
+    try {
+      const visit = await visitSvc.sendAttachment(
+        supabaseClient,
+        twilioClient,
+        {
+          clinicId: req.staff.clinicId,
+          visitId: req.params.id,
+          path,
+          staffId: req.staff.staffId,
+          staffContext: { role: req.staff.role, doctorId: req.staff.doctorId },
+        },
+        req.log,
+      );
+      return ok(res, { visit });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:visits] send attachment failed");
       return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
     }
   });

@@ -9,6 +9,7 @@ process.env.TWILIO_DOCTOR_UNAVAILABLE_CONTENT_SID = "HXaaaaaaaaaaaaaaaaaaaaaaaaa
 const {
   bookAppointment,
   rescheduleAppointment,
+  reorderDayAppointments,
   cancelAppointment,
   markCompleted,
   revertCompleted,
@@ -1054,5 +1055,172 @@ describe("markNoShow", () => {
     const result = await markNoShow(supabaseClient, { appointmentId: "apt_1", clinicId: "clinic-1" }, null, throwingTwilio);
     assert.equal(result.status, "no_show");
     assert.equal(supabaseClient._tables.Appointment[0].status, "no_show");
+  });
+});
+
+describe("reorderDayAppointments", () => {
+  const TOMORROW = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const T1 = `${TOMORROW}T09:00:00.000Z`;
+  const T2 = `${TOMORROW}T09:30:00.000Z`;
+  const T3 = `${TOMORROW}T10:00:00.000Z`;
+
+  function seed({ rescheduleCutoffHours = 48, appointments } = {}) {
+    return createTableStub({
+      Clinic: [
+        {
+          id: "clinic-1", status: "active", name: "Nirmaya Clinic", schedulerServiceId: "svc-001",
+          timezone: "Asia/Kolkata", workingDays: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+          openingHour: 9, closingHour: 18, defaultAppointmentDurationMins: 30, bufferMins: 5,
+          minNoticeHours: 0, maxBookingWindowDays: 30, cancellationCutoffHours: 0, rescheduleCutoffHours,
+        },
+      ],
+      Doctor: [
+        {
+          id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true,
+          schedulerDoctorId: "nettu-doc-1", schedulerCalendarId: "nettu-cal-1",
+          workingHoursStart: "09:00", workingHoursEnd: "18:00",
+        },
+      ],
+      Appointment: appointments ?? [
+        { id: "apt_a", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T1, durationMinutes: 30, status: "booked", auditHistory: [] },
+        { id: "apt_b", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T2, durationMinutes: 30, status: "booked", auditHistory: [] },
+        { id: "apt_c", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T3, durationMinutes: 30, status: "booked", auditHistory: [] },
+      ],
+    });
+  }
+
+  function makeNettuOk() {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      async createEvent() { calls += 1; return { id: `nettu-event-${calls}` }; },
+      async deleteEvent() { return {}; },
+    };
+  }
+
+  test("swapping two appointments' positions actually reschedules both to each other's real slot", async () => {
+    const supabaseClient = seed();
+    const nettu = makeNettuOk();
+    const result = await reorderDayAppointments(
+      nettu, supabaseClient,
+      { clinicId: "clinic-1", doctorId: "doc-1", date: TOMORROW, orderedAppointmentIds: ["apt_b", "apt_a", "apt_c"] },
+      null, createTwilioStub(),
+    );
+    assert.deepEqual(result.reordered.sort(), ["apt_a", "apt_b"]); // apt_c stayed put, excluded
+    const byId = Object.fromEntries(supabaseClient._tables.Appointment.map((a) => [a.id, a]));
+    assert.equal(byId.apt_b.timeslot, T1);
+    assert.equal(byId.apt_a.timeslot, T2);
+    assert.equal(byId.apt_c.timeslot, T3); // untouched — same position as before
+  });
+
+  test("an order identical to the current one makes zero reschedule calls", async () => {
+    const supabaseClient = seed();
+    const nettu = makeNettuOk();
+    const result = await reorderDayAppointments(
+      nettu, supabaseClient,
+      { clinicId: "clinic-1", doctorId: "doc-1", date: TOMORROW, orderedAppointmentIds: ["apt_a", "apt_b", "apt_c"] },
+      null, createTwilioStub(),
+    );
+    assert.deepEqual(result.reordered, []);
+    assert.equal(nettu.calls(), 0);
+  });
+
+  test("rejects a stale/mismatched list instead of silently reordering a subset", async () => {
+    const supabaseClient = seed();
+    await assert.rejects(
+      () => reorderDayAppointments(
+        makeNettuOk(), supabaseClient,
+        { clinicId: "clinic-1", doctorId: "doc-1", date: TOMORROW, orderedAppointmentIds: ["apt_a", "apt_b"] }, // missing apt_c
+        null, createTwilioStub(),
+      ),
+      (err) => { assert.equal(err.code, "REORDER_STALE"); return true; },
+    );
+  });
+
+  test("a genuine overlap from differing durations is rejected up front, with zero appointments actually moved", async () => {
+    const supabaseClient = seed({
+      appointments: [
+        // apt_a is 45 min — swapping it into apt_b's slot would run past apt_c's start.
+        { id: "apt_a", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T1, durationMinutes: 45, status: "booked", auditHistory: [] },
+        { id: "apt_b", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T2, durationMinutes: 30, status: "booked", auditHistory: [] },
+        { id: "apt_c", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T3, durationMinutes: 30, status: "booked", auditHistory: [] },
+      ],
+    });
+    const nettu = makeNettuOk();
+    await assert.rejects(
+      () => reorderDayAppointments(
+        nettu, supabaseClient,
+        { clinicId: "clinic-1", doctorId: "doc-1", date: TOMORROW, orderedAppointmentIds: ["apt_b", "apt_a", "apt_c"] },
+        null, createTwilioStub(),
+      ),
+      (err) => { assert.equal(err.code, "REORDER_CONFLICT"); return true; },
+    );
+    // Dry-run caught it before any real nettu/DB call — nothing should have moved.
+    assert.equal(nettu.calls(), 0);
+    const byId = Object.fromEntries(supabaseClient._tables.Appointment.map((a) => [a.id, a]));
+    assert.equal(byId.apt_a.timeslot, T1);
+    assert.equal(byId.apt_b.timeslot, T2);
+    assert.equal(byId.apt_c.timeslot, T3);
+  });
+
+  test("bypasses the reschedule cutoff — a doctor can reorder imminent same-day appointments that a normal reschedule would reject", async () => {
+    // rescheduleCutoffHours: 48 means a normal (non-bypass) reschedule of a
+    // tomorrow appointment would be rejected outright. reorderDayAppointments
+    // must still succeed — this is the real risk this feature's own
+    // verification surfaced (rescheduleAppointment's cutoff would otherwise
+    // make same-day reordering, the entire point of this feature, unusable).
+    const supabaseClient = seed({ rescheduleCutoffHours: 48 });
+    await assert.rejects(
+      () => rescheduleAppointment(
+        makeNettuOk(), supabaseClient,
+        { appointmentId: "apt_a", clinicId: "clinic-1", doctorId: "doc-1", newStart: T2 },
+        null, createTwilioStub(),
+      ),
+      (err) => { assert.equal(err.code, "RESCHEDULE_NOT_ALLOWED"); return true; },
+    );
+
+    const result = await reorderDayAppointments(
+      makeNettuOk(), supabaseClient,
+      { clinicId: "clinic-1", doctorId: "doc-1", date: TOMORROW, orderedAppointmentIds: ["apt_b", "apt_a", "apt_c"] },
+      null, createTwilioStub(),
+    );
+    assert.deepEqual(result.reordered.sort(), ["apt_a", "apt_b"]);
+  });
+
+  test("rolls back already-moved appointments to their original times when a later move in the same reorder fails", async () => {
+    const supabaseClient = seed();
+    let calls = 0;
+    const flakyNettu = {
+      async createEvent() {
+        calls += 1;
+        if (calls === 2) throw Object.assign(new Error("scheduler blip"), { httpStatus: 409 });
+        return { id: `nettu-event-${calls}` };
+      },
+      async deleteEvent() { return {}; },
+    };
+    await assert.rejects(
+      () => reorderDayAppointments(
+        flakyNettu, supabaseClient,
+        { clinicId: "clinic-1", doctorId: "doc-1", date: TOMORROW, orderedAppointmentIds: ["apt_c", "apt_a", "apt_b"] },
+        null, createTwilioStub(),
+      ),
+      (err) => { assert.equal(err.code, "REORDER_CONFLICT"); return true; },
+    );
+    // apt_c's move (the first one attempted) must have been reverted back to
+    // its original slot, not left at the new time it briefly held.
+    const byId = Object.fromEntries(supabaseClient._tables.Appointment.map((a) => [a.id, a]));
+    assert.equal(byId.apt_c.timeslot, T3, "expected apt_c's rollback to restore its original timeslot");
+  });
+
+  test("throws MISSING_FIELDS for an empty orderedAppointmentIds", async () => {
+    const supabaseClient = seed();
+    await assert.rejects(
+      () => reorderDayAppointments(
+        makeNettuOk(), supabaseClient,
+        { clinicId: "clinic-1", doctorId: "doc-1", date: TOMORROW, orderedAppointmentIds: [] },
+        null, createTwilioStub(),
+      ),
+      (err) => { assert.equal(err.code, "MISSING_FIELDS"); return true; },
+    );
   });
 });

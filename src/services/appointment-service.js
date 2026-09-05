@@ -35,14 +35,21 @@ function bookingUrlFor(clinicId, appointmentId) {
 // version of this function — whenever the template isn't configured, the
 // clinic has no WhatsApp number, or the WhatsApp send itself fails.
 async function sendDoctorUnavailableRebookNotice(supabaseClient, twilioClient, { clinic, clinicRules, conflict, doctor }, log) {
-  if (!twilioClient || !conflict.patientId) return;
+  if (!twilioClient) return;
+  if (!conflict.patientId) {
+    log?.warn({ appointmentId: conflict.id }, "[appointmentSvc] skipping doctor-unavailable rebook notice: no patientId on the displaced appointment");
+    return;
+  }
   try {
     const { data: patient } = await supabaseClient
       .from("Patient")
       .select("fullName, contactNumber")
       .eq("id", conflict.patientId)
       .maybeSingle();
-    if (!patient?.contactNumber) return;
+    if (!patient?.contactNumber) {
+      log?.warn({ appointmentId: conflict.id, patientId: conflict.patientId }, "[appointmentSvc] skipping doctor-unavailable rebook notice: patient has no contactNumber");
+      return;
+    }
 
     const oldTime = formatHumanTime(new Date(conflict.timeslot).getTime(), clinicRules.timezone);
     // Carries doctorId so the landing page (schedurx-form-agent's intake
@@ -737,9 +744,9 @@ async function expirePendingBookings(nettuClient, supabaseClient, log) {
 
 // ─── Reschedule ───────────────────────────────────────────────────────────────
 
-// opts: { appointmentId, clinicId, doctorId, newStart, newEnd?, reason?, source? }
+// opts: { appointmentId, clinicId, doctorId, newStart, newEnd?, reason?, source?, bypassCutoff?, ignoreAppointmentIds? }
 async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twilioClient) {
-  const { appointmentId, clinicId, doctorId, newStart, newEnd, reason, source = "system" } = opts;
+  const { appointmentId, clinicId, doctorId, newStart, newEnd, reason, source = "system", bypassCutoff = false, ignoreAppointmentIds } = opts;
 
   // Fetch the existing appointment.
   const { data: appt, error: fetchErr } = await supabaseClient
@@ -775,9 +782,14 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
   const doctorRules = doctorSvc.getSchedulingRules(doctor, clinicRules);
   const timezone = doctorRules.timezone;
 
-  // Enforce reschedule cutoff — skipped for a blocked-time entry, same as
-  // cancelAppointment's identical exception (no patient to protect).
-  if (appt.status !== "blocked" && appt.timeslot) {
+  // Enforce reschedule cutoff — skipped for a blocked-time entry (same as
+  // cancelAppointment's identical exception, no patient to protect) and
+  // when bypassCutoff is explicitly set. bypassCutoff exists ONLY for
+  // reorderDayAppointments below (a doctor reordering their own imminent
+  // same-day schedule) — never accept it from a client-controllable field
+  // on any other call site; the cutoff exists to stop a late reschedule
+  // request FROM a patient/staff member, not to be skippable on request.
+  if (!bypassCutoff && appt.status !== "blocked" && appt.timeslot) {
     const originalStartMs = new Date(appt.timeslot).getTime();
     const cutoffMs = clinicRules.rescheduleCutoffHours * 60 * 60 * 1000;
     if (originalStartMs - Date.now() < cutoffMs) {
@@ -825,11 +837,24 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
         statusCode: 500,
       });
     }
-    const hasOverlap = (existingRows ?? []).some((row) => {
-      const rowStartMs = new Date(row.timeslot).getTime();
-      const rowEndMs = rowStartMs + (row.durationMinutes ?? 30) * 60_000;
-      return rowStartMs < newEndMs && rowEndMs > newStartMs;
-    });
+    // ignoreAppointmentIds: used ONLY by reorderDayAppointments — mid-way
+    // through a batch permutation, another appointment that's ALSO part of
+    // this same reorder can be sitting at a slot this one is about to move
+    // into (that's the whole nature of a swap: A briefly "conflicts" with
+    // B's still-current row before B has moved out of the way). The dry-run
+    // in reorderDayAppointments already proved the FINAL state has no real
+    // conflicts; a transient mid-batch collision against another row from
+    // the SAME batch is a false positive, not a real one, so it's excluded
+    // here — a collision against any OTHER appointment (not part of this
+    // reorder) still correctly rejects.
+    const ignoreSet = new Set(ignoreAppointmentIds ?? []);
+    const hasOverlap = (existingRows ?? [])
+      .filter((row) => !ignoreSet.has(row.id))
+      .some((row) => {
+        const rowStartMs = new Date(row.timeslot).getTime();
+        const rowEndMs = rowStartMs + (row.durationMinutes ?? 30) * 60_000;
+        return rowStartMs < newEndMs && rowEndMs > newStartMs;
+      });
     if (hasOverlap) {
       throw Object.assign(new Error("The selected slot is no longer available"), {
         code: "SLOT_NOT_AVAILABLE",
@@ -976,6 +1001,163 @@ async function rescheduleAppointment(nettuClient, supabaseClient, opts, log, twi
     newStart: epochToISO(newStartMs, timezone),
     newEnd: epochToISO(newEndMs, timezone),
   };
+}
+
+// ─── Reorder ("manage today's appointments" drag-and-drop) ─────────────────
+//
+// Permutes which existing appointment occupies which of a day's real
+// booked time slots — the time grid itself (T1 < T2 < ... < TN, each Ti one
+// appointment's actual booked start) is preserved exactly; only which
+// appointment sits at which Ti changes. Each appointment keeps its own
+// durationMinutes, which is exactly why this can't be a purely visual
+// relabel: two appointments of different lengths can genuinely no longer
+// fit once they swap slots, so this has to be a REAL reschedule per moved
+// appointment — real overlap check, real nettu sync, real patient
+// notification — by explicit user decision, not a display-only reorder.
+//
+// opts: { clinicId, doctorId, date (YYYY-MM-DD), orderedAppointmentIds: string[] }
+async function reorderDayAppointments(nettuClient, supabaseClient, opts, log, twilioClient) {
+  const { clinicId, doctorId, date, orderedAppointmentIds } = opts;
+  if (!clinicId || !doctorId || !date) {
+    throw Object.assign(new Error("clinicId, doctorId, and date are required"), { code: "MISSING_FIELDS", statusCode: 422 });
+  }
+  if (!Array.isArray(orderedAppointmentIds) || orderedAppointmentIds.length === 0) {
+    throw Object.assign(new Error("orderedAppointmentIds must be a non-empty array"), { code: "MISSING_FIELDS", statusCode: 422 });
+  }
+  if (orderedAppointmentIds.length > MAX_BULK_APPOINTMENTS) {
+    throw Object.assign(new Error(`Can't reorder more than ${MAX_BULK_APPOINTMENTS} appointments at once`), {
+      code: "TOO_MANY_APPOINTMENTS",
+      statusCode: 422,
+    });
+  }
+
+  // Same day-boundary convention as table-service.js's listAppointmentsForClinic
+  // (date filter) — a plain, offset-less "YYYY-MM-DDT00:00:00" bound, not a
+  // clinic-timezone-aware one, matching how "today" is already computed
+  // everywhere else in this codebase rather than introducing a second,
+  // subtly different convention just for this feature.
+  //
+  // Scoped to booked/tentative only (not blocked or completed) — the doctor
+  // reorders the patients they haven't seen yet, not a visit that already
+  // happened or the doctor's own blocked-out time. This has to match
+  // exactly what the frontend shows as draggable, since orderedAppointmentIds
+  // is validated below as an exact permutation of this same fetched set.
+  const { data: dayAppointments, error: fetchErr } = await supabaseClient
+    .from("Appointment")
+    .select("id, timeslot, durationMinutes")
+    .eq("clinicId", clinicId)
+    .eq("doctorId", doctorId)
+    .in("status", ["booked", "tentative"])
+    .gte("timeslot", `${date}T00:00:00`)
+    .lt("timeslot", `${date}T23:59:59.999`)
+    .order("timeslot", { ascending: true });
+  if (fetchErr) throw Object.assign(new Error(`DB error: ${fetchErr.message}`), { code: "DATABASE_ERROR", statusCode: 500 });
+
+  const byId = new Map((dayAppointments ?? []).map((a) => [a.id, a]));
+  // A stale client list (the day changed server-side since the doctor's
+  // screen loaded) must be rejected outright, not silently reordered as a
+  // mismatched subset.
+  if (orderedAppointmentIds.length !== byId.size || !orderedAppointmentIds.every((id) => byId.has(id))) {
+    throw Object.assign(new Error("This reorder doesn't match today's current appointment list — reload and try again"), {
+      code: "REORDER_STALE",
+      statusCode: 409,
+    });
+  }
+
+  const timeGrid = (dayAppointments ?? []).map((a) => a.timeslot); // already sorted by timeslot
+  const moves = [];
+  orderedAppointmentIds.forEach((appointmentId, index) => {
+    const appt = byId.get(appointmentId);
+    const newStart = timeGrid[index];
+    if (newStart !== appt.timeslot) {
+      moves.push({ appointmentId, newStart, oldStart: appt.timeslot, durationMinutes: appt.durationMinutes ?? 30 });
+    }
+  });
+
+  if (moves.length === 0) {
+    return { reordered: [] };
+  }
+
+  // Dry-run: validate the ENTIRE proposed permutation for overlaps before
+  // making any real nettu/notification call. This is what keeps the common
+  // case (a valid reorder) from ever touching the rollback path below —
+  // only a genuine race (the day's schedule changed between this dry run
+  // and the real sequential apply, a few lines down) should ever need it.
+  const finalById = new Map(byId);
+  for (const move of moves) finalById.set(move.appointmentId, { ...finalById.get(move.appointmentId), timeslot: move.newStart });
+  const finalList = [...finalById.values()];
+  for (let i = 0; i < finalList.length; i++) {
+    const aStart = new Date(finalList[i].timeslot).getTime();
+    const aEnd = aStart + (finalList[i].durationMinutes ?? 30) * 60_000;
+    for (let j = i + 1; j < finalList.length; j++) {
+      const bStart = new Date(finalList[j].timeslot).getTime();
+      const bEnd = bStart + (finalList[j].durationMinutes ?? 30) * 60_000;
+      if (aStart < bEnd && bStart < aEnd) {
+        throw Object.assign(
+          new Error("That order would overlap two appointments of different lengths — try a different position"),
+          { code: "REORDER_CONFLICT", statusCode: 409, appointmentId: finalList[i].id },
+        );
+      }
+    }
+  }
+
+  // Apply sequentially — real nettu calls and real patient notifications
+  // can't be wrapped in a single DB transaction, so "rollback" here means a
+  // best-effort compensating reschedule back to the original time, not
+  // atomicity. The dry-run above means this loop succeeds cleanly in the
+  // overwhelming common case; this path only matters for a genuine race.
+  // Every id in this batch is exempted from the OTHER moves' overlap checks
+  // (see rescheduleAppointment's ignoreAppointmentIds comment) — a mid-swap
+  // transient collision against a row that's itself about to move (or, in
+  // rollback, about to move back) is expected and not a real conflict; a
+  // collision against any appointment NOT in this set still correctly
+  // rejects.
+  const batchIds = moves.map((m) => m.appointmentId);
+
+  const applied = [];
+  let failedMove = null;
+  try {
+    for (const move of moves) {
+      failedMove = move;
+      await rescheduleAppointment(
+        nettuClient,
+        supabaseClient,
+        { appointmentId: move.appointmentId, clinicId, doctorId, newStart: move.newStart, source: "doctor-reorder", bypassCutoff: true, ignoreAppointmentIds: batchIds },
+        log,
+        twilioClient,
+      );
+      applied.push(move);
+      failedMove = null;
+    }
+  } catch (err) {
+    log?.error(
+      { err, appliedCount: applied.length, totalMoves: moves.length, failedAppointmentId: failedMove?.appointmentId },
+      "[appointmentSvc] reorder failed partway — rolling back already-moved appointments",
+    );
+    for (const move of applied.reverse()) {
+      try {
+        await rescheduleAppointment(
+          nettuClient,
+          supabaseClient,
+          { appointmentId: move.appointmentId, clinicId, doctorId, newStart: move.oldStart, source: "doctor-reorder-rollback", bypassCutoff: true, ignoreAppointmentIds: batchIds },
+          log,
+          twilioClient,
+        );
+      } catch (rollbackErr) {
+        log?.error(
+          { err: rollbackErr, appointmentId: move.appointmentId },
+          "[appointmentSvc] rollback itself failed — this appointment may be left at its new (unintended) time",
+        );
+      }
+    }
+    throw Object.assign(new Error(err.message || "Couldn't complete the reorder"), {
+      code: err.code === "SLOT_NOT_AVAILABLE" ? "REORDER_CONFLICT" : (err.code ?? "REORDER_FAILED"),
+      statusCode: err.statusCode ?? 500,
+      appointmentId: failedMove?.appointmentId ?? null,
+    });
+  }
+
+  return { reordered: moves.map((m) => m.appointmentId) };
 }
 
 // ─── Cancel ───────────────────────────────────────────────────────────────────
@@ -1460,6 +1642,7 @@ module.exports = {
   rescheduleAppointment,
   cancelAppointment,
   rescheduleAppointments,
+  reorderDayAppointments,
   cancelAppointments,
   validateAndReserveSlot,
   persistAppointment,

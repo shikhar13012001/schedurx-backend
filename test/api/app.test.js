@@ -505,6 +505,127 @@ test("GET /api/v1/appointments scopes strictly to the authenticated staff member
   });
 });
 
+// Regression test for a live-reported bug (2026-09-02): POST /block never
+// passed twilioClient through to appointmentSvc.bookAppointment, so the
+// doctor-unavailable rebook notice silently no-op'd on its own first line
+// for every appointment displaced by a block — no error, no log, nothing.
+// A service-level test can't catch this class of bug (it calls
+// bookAppointment directly, bypassing the route layer entirely) — this has
+// to be a real HTTP-level test of the route itself.
+test("POST /api/v1/appointments/block sends the doctor-unavailable rebook notice for a displaced booking", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "reception", clinicId: "clinic-1" },
+  });
+  const FUTURE_START = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const FUTURE_END = new Date(new Date(FUTURE_START).getTime() + 2 * 60 * 60 * 1000).toISOString();
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [
+      {
+        id: "clinic-1", status: "active", name: "Nirmaya Clinic", phone: "+919999999999",
+        schedulerServiceId: "svc-001", timezone: "Asia/Kolkata", openingHour: 9, closingHour: 18,
+        minNoticeHours: 0, maxBookingWindowDays: 30, cancellationCutoffHours: 0,
+      },
+    ],
+    Doctor: [
+      {
+        id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true,
+        schedulerDoctorId: "n-doc-1", schedulerCalendarId: "n-cal-1",
+        workingHoursStart: "09:00", workingHoursEnd: "18:00",
+      },
+    ],
+    Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+    Appointment: [
+      {
+        id: "apt_conflict", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1",
+        timeslot: FUTURE_START, durationMinutes: 30, status: "booked", auditHistory: [],
+      },
+    ],
+  });
+  const nettuClient = {
+    async createEvent() {
+      return { id: "nettu-event-block" };
+    },
+    async deleteEvent() {
+      return { id: "nettu-event-block" };
+    },
+  };
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/appointments/block", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ doctorId: "doc-1", start: FUTURE_START, end: FUTURE_END, reason: "Doctor unavailable" }),
+    });
+    assert.equal(response.status, 201);
+  });
+
+  const rebookSend = twilioClient.calls.sendSms.find((c) => c.purpose === "doctor_unavailable_rebook");
+  assert.ok(rebookSend, "expected a direct doctor_unavailable_rebook SMS to fire for the displaced booking");
+  assert.equal(rebookSend.to, "+919888888888");
+
+  const conflictRow = supabaseClient._tables.Appointment.find((a) => a.id === "apt_conflict");
+  assert.equal(conflictRow.status, "cancelled");
+});
+
+// Route-level coverage for the "manage today's appointments" drag-and-drop
+// screen's backend — a pure service-level test can't catch a wiring bug at
+// the route layer (see the /block regression right above this one, which
+// was exactly that class of bug), so this exercises the real HTTP path.
+test("POST /api/v1/appointments/reorder-day actually swaps two appointments' real booked times", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1", doctorId: "doc-1" },
+  });
+  const TOMORROW = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const T1 = `${TOMORROW}T09:00:00.000Z`;
+  const T2 = `${TOMORROW}T09:30:00.000Z`;
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1", doctorId: "doc-1" }],
+    Clinic: [
+      {
+        id: "clinic-1", status: "active", name: "Nirmaya Clinic", schedulerServiceId: "svc-001",
+        timezone: "Asia/Kolkata", openingHour: 9, closingHour: 18, minNoticeHours: 0,
+        maxBookingWindowDays: 30, cancellationCutoffHours: 0, rescheduleCutoffHours: 48,
+      },
+    ],
+    Doctor: [
+      {
+        id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true,
+        schedulerDoctorId: "n-doc-1", schedulerCalendarId: "n-cal-1",
+        workingHoursStart: "09:00", workingHoursEnd: "18:00",
+      },
+    ],
+    Appointment: [
+      { id: "apt_a", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T1, durationMinutes: 30, status: "booked", auditHistory: [] },
+      { id: "apt_b", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T2, durationMinutes: 30, status: "booked", auditHistory: [] },
+    ],
+  });
+  const nettuClient = {
+    async createEvent() { return { id: "nettu-event-reorder" }; },
+    async deleteEvent() { return {}; },
+  };
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/appointments/reorder-day", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ doctorId: "doc-1", date: TOMORROW, orderedAppointmentIds: ["apt_b", "apt_a"] }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.data.reordered.sort(), ["apt_a", "apt_b"]);
+  });
+
+  const byId = Object.fromEntries(supabaseClient._tables.Appointment.map((a) => [a.id, a]));
+  assert.equal(byId.apt_b.timeslot, T1);
+  assert.equal(byId.apt_a.timeslot, T2);
+  assert.equal(twilioClient.calls.sendSms.length + twilioClient.calls.sendWhatsApp.length, 0); // no patient on either row in this fixture — no notification expected, just confirming the reschedule itself didn't error trying
+});
+
 // ─── Pay-first token payments (Phase 3) ─────────────────────────────────────
 
 function tokenClinicRow(overrides = {}) {
@@ -1998,6 +2119,70 @@ test("POST /api/v1/visits/:id/attachments appends to rxAttachments and read-url 
     );
     assert.equal(badRead.status, 403);
   });
+});
+
+// Regression coverage for the photo-Rx "no send action at all" gap: the
+// generated-PDF flow already sent a WhatsApp link inline in the frontend;
+// the photo-upload flow had no send action whatsoever. This is the one new
+// endpoint both now go through.
+test("POST /api/v1/visits/:id/attachments/send messages the patient a link and marks the attachment sent", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Patient: [{ id: "pat_1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+    Visit: [
+      {
+        id: "visit_1", clinicId: "clinic-1", patientId: "pat_1",
+        rxAttachments: [{ path: "clinic-1/visit_1/rx.jpg", type: "photo", uploadedAt: new Date().toISOString() }],
+      },
+    ],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/visits/visit_1/attachments/send", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "clinic-1/visit_1/rx.jpg" }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.ok(body.data.visit.rxAttachments[0].sentAt, "expected sentAt to be set on the attachment");
+  });
+
+  const sent = twilioClient.calls.sendWhatsApp.find((c) => c.to === "+919888888888");
+  assert.ok(sent, "expected a WhatsApp send to the patient");
+  assert.match(sent.body, /Rahul.*prescription photo/s);
+
+  const threadRows = supabaseClient._tables.Thread ?? [];
+  assert.equal(threadRows.length, 1, "expected exactly one thread to be created/reused");
+});
+
+test("POST /api/v1/visits/:id/attachments/send 404s for a path that isn't a real attachment on this visit", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Patient: [{ id: "pat_1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+    Visit: [{ id: "visit_1", clinicId: "clinic-1", patientId: "pat_1", rxAttachments: [] }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/visits/visit_1/attachments/send", {
+      method: "POST",
+      headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "clinic-1/visit_1/nope.jpg" }),
+    });
+    assert.equal(response.status, 404);
+  });
+  assert.equal(twilioClient.calls.sendWhatsApp.length, 0);
 });
 
 test("POST /api/v1/visits/:id/recap turns a typed recap into a structured note and saves it", async () => {
