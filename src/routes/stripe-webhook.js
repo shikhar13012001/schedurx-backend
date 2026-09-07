@@ -49,7 +49,7 @@ function createStripeWebhookRouter(supabaseClient, stripeClient, twilioClient, n
         // real Appointment. Idempotent on the PendingBooking's own status,
         // so a Stripe retry of this same event is safe.
         try {
-          await appointmentSvc.finalizePendingBooking(nettuClient, supabaseClient, session.metadata.pendingBookingId, req.log, twilioClient);
+          await appointmentSvc.finalizePendingBooking(nettuClient, supabaseClient, session.metadata.pendingBookingId, req.log, twilioClient, session.payment_intent);
         } catch (err) {
           req.log?.error(
             { err, pendingBookingId: session.metadata.pendingBookingId },

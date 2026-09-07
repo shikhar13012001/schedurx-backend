@@ -7,19 +7,8 @@ function dbErr(msg) {
   return Object.assign(new Error(`DB error ${msg}`), { code: "DATABASE_ERROR", statusCode: 500 });
 }
 
-async function getSummary(supabaseClient, clinicId, { days = 30 } = {}) {
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-
-  const { data, error } = await supabaseClient
-    .from("day_stats")
-    .select("*")
-    .eq("clinicId", clinicId)
-    .gte("day", since)
-    .order("day", { ascending: true });
-  if (error) throw dbErr(`reading day_stats: ${error.message}`);
-
-  const rows = data ?? [];
-  const totals = rows.reduce(
+function sumDayStats(rows) {
+  return rows.reduce(
     (acc, row) => ({
       appointments: acc.appointments + (row.appointments ?? 0),
       revenue: acc.revenue + Number(row.revenue ?? 0),
@@ -27,8 +16,28 @@ async function getSummary(supabaseClient, clinicId, { days = 30 } = {}) {
     }),
     { appointments: 0, revenue: 0, cancellations: 0 },
   );
+}
 
-  return { daily: rows, totals };
+// previousTotals is the immediately preceding window of the same length
+// (days 31-60 back, for the default 30-day summary) — real month-over-month
+// comparison, not a placeholder. Live-reported gap (2026-09-08): the
+// dashboard was showing a hardcoded "+9% from last month" regardless of
+// actual data; this is what a real trend figure needs to be computed from.
+async function getSummary(supabaseClient, clinicId, { days = 30 } = {}) {
+  const now = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const since = new Date(now - days * dayMs).toISOString().slice(0, 10);
+  const previousSince = new Date(now - days * 2 * dayMs).toISOString().slice(0, 10);
+
+  const [{ data, error }, { data: previousData, error: previousError }] = await Promise.all([
+    supabaseClient.from("day_stats").select("*").eq("clinicId", clinicId).gte("day", since).order("day", { ascending: true }),
+    supabaseClient.from("day_stats").select("*").eq("clinicId", clinicId).gte("day", previousSince).lt("day", since),
+  ]);
+  if (error) throw dbErr(`reading day_stats: ${error.message}`);
+  if (previousError) throw dbErr(`reading previous day_stats: ${previousError.message}`);
+
+  const rows = data ?? [];
+  return { daily: rows, totals: sumDayStats(rows), previousTotals: sumDayStats(previousData ?? []) };
 }
 
 const DAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];

@@ -41,6 +41,44 @@ async function createInvoice(supabaseClient, { clinicId, patientId, appointmentI
   return data;
 }
 
+// Records a patient token/deposit payment as an already-paid Invoice —
+// unlike createInvoice + attachStripeSession + markPaidByStripeSession's
+// three-step dance (needed when the checkout session is created BEFORE the
+// payment resolves), a token payment's webhook only ever fires after Stripe
+// has already confirmed the charge, so there's nothing to reconcile later —
+// insert it paid, directly. Live-reported gap (2026-09-08): a real,
+// successfully collected token payment previously left no Invoice row at
+// all — the analytics page's revenue figure (which sums paid Invoices) was
+// reading 0 even for clinics actively collecting deposits.
+async function recordPaidTokenPayment(supabaseClient, { clinicId, patientId, appointmentId, amountInr, stripeCheckoutSessionId, stripePaymentIntentId }) {
+  if (!amountInr || amountInr <= 0) {
+    throw Object.assign(new Error("amountInr must be a positive number"), { code: "INVALID_AMOUNT", statusCode: 422 });
+  }
+  const now = new Date().toISOString();
+  const { data, error } = await supabaseClient
+    .from("Invoice")
+    .insert({
+      id: makeId("inv"),
+      clinicId,
+      patientId: patientId ?? null,
+      appointmentId: appointmentId ?? null,
+      visitId: null,
+      amountInr,
+      status: "paid",
+      provider: "stripe",
+      providerReference: stripePaymentIntentId ?? null,
+      providerMetadata: { stripeCheckoutSessionId, stripePaymentIntentId, source: "token_payment" },
+      stripeCheckoutSessionId: stripeCheckoutSessionId ?? null,
+      paidAt: now,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .select()
+    .single();
+  if (error) throw dbErr(`recording paid token payment: ${error.message}`);
+  return data;
+}
+
 async function attachStripeSession(supabaseClient, invoiceId, stripeCheckoutSessionId) {
   const { error } = await supabaseClient
     .from("Invoice")
@@ -72,4 +110,4 @@ async function markPaidByStripeSession(supabaseClient, stripeCheckoutSessionId, 
   return data ?? null; // null is expected if the session wasn't ours (defensive, never throws in a webhook path)
 }
 
-module.exports = { listInvoices, createInvoice, attachStripeSession, markPaidByStripeSession };
+module.exports = { listInvoices, createInvoice, recordPaidTokenPayment, attachStripeSession, markPaidByStripeSession };

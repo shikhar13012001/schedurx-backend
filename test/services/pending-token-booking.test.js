@@ -136,6 +136,45 @@ describe("finalizePendingBooking", () => {
     assert.equal(pendingRow.status, "completed");
   });
 
+  // Regression coverage for a live-reported gap (2026-09-08): a real,
+  // successfully collected token payment used to leave no Invoice row at
+  // all, so the analytics page's revenue figure read 0 for a clinic
+  // actively collecting deposits — the money was genuinely charged via
+  // Stripe but invisible in the app's own data.
+  test("records a paid Invoice for the collected token amount", async () => {
+    const { supabaseClient, nettu, created } = await seedPending();
+
+    const appointment = await appointmentSvc.finalizePendingBooking(
+      nettu, supabaseClient, created.pendingBookingId, null, createTwilioStub(), "pi_test_123",
+    );
+
+    const invoices = supabaseClient._tables.Invoice ?? [];
+    assert.equal(invoices.length, 1);
+    const invoice = invoices[0];
+    assert.equal(invoice.status, "paid");
+    assert.equal(invoice.amountInr, 200); // amountPaise: 20000 -> 200 INR
+    assert.equal(invoice.appointmentId, appointment.appointmentId);
+    assert.equal(invoice.provider, "stripe");
+    assert.equal(invoice.providerReference, "pi_test_123");
+    assert.ok(invoice.paidAt);
+  });
+
+  test("still returns the booked appointment even if recording the Invoice itself fails", async () => {
+    const { supabaseClient, nettu, created } = await seedPending();
+    // Corrupt the fixture so the Invoice insert path throws (amountPaise
+    // missing/invalid) without touching the booking flow at all — proves
+    // this failure is genuinely best-effort, not silently masking a real
+    // booking failure too.
+    const pendingRow = supabaseClient._tables.PendingBooking.find((r) => r.id === created.pendingBookingId);
+    pendingRow.amountPaise = 0;
+
+    const appointment = await appointmentSvc.finalizePendingBooking(
+      nettu, supabaseClient, created.pendingBookingId, { info: () => {}, warn: () => {}, error: () => {} }, createTwilioStub(), "pi_test_456",
+    );
+    assert.equal(appointment.status, "booked");
+    assert.equal((supabaseClient._tables.Invoice ?? []).length, 0);
+  });
+
   test("is idempotent — a second call (e.g. a Stripe webhook retry) does not double-book", async () => {
     const { supabaseClient, nettu, created } = await seedPending();
 

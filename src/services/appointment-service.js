@@ -7,6 +7,7 @@ const doctorSvc = require("./doctor-service");
 const { epochToISO, formatHumanTime, toDateString } = require("./availability-service");
 const commsWorkflowSvc = require("./comms-workflow-service");
 const visitSvc = require("./visit-service");
+const invoiceSvc = require("./invoice-service");
 const { config } = require("../config");
 const { createRebookToken, rebookLinkUrl } = require("../lib/rebook-token");
 
@@ -620,7 +621,7 @@ async function getPendingBookingById(supabaseClient, clinicId, pendingBookingId)
 // since the row is no longer status:"pending". Returns null (never throws)
 // for an unknown id or a non-pending row, matching invoice-service.js's
 // markPaidByStripeSession "defensive, never throws in a webhook path" shape.
-async function finalizePendingBooking(nettuClient, supabaseClient, pendingBookingId, log, twilioClient) {
+async function finalizePendingBooking(nettuClient, supabaseClient, pendingBookingId, log, twilioClient, stripePaymentIntentId) {
   const { data: pending, error } = await supabaseClient
     .from("PendingBooking")
     .select("*")
@@ -684,7 +685,7 @@ async function finalizePendingBooking(nettuClient, supabaseClient, pendingBookin
       nettuEvent: { id: pending.schedulerEventId },
     };
 
-    return await persistAppointment(
+    const result = await persistAppointment(
       nettuClient,
       supabaseClient,
       reservation,
@@ -692,6 +693,24 @@ async function finalizePendingBooking(nettuClient, supabaseClient, pendingBookin
       log,
       twilioClient,
     );
+
+    // Best-effort, after the booking that already genuinely happened — a
+    // failure here must never undo or fail the appointment itself, same
+    // posture as every other post-booking side effect in this file.
+    try {
+      await invoiceSvc.recordPaidTokenPayment(supabaseClient, {
+        clinicId: pending.clinicId,
+        patientId: pending.bookingParams?.patientId ?? null,
+        appointmentId: result.appointmentId,
+        amountInr: pending.amountPaise / 100,
+        stripeCheckoutSessionId: pending.stripeCheckoutSessionId,
+        stripePaymentIntentId,
+      });
+    } catch (err) {
+      log?.error({ err, pendingBookingId }, "[appointmentSvc] booked successfully but failed to record the paid Invoice — revenue will be undercounted until reconciled");
+    }
+
+    return result;
   } catch (err) {
     log?.error({ err, pendingBookingId }, "[appointmentSvc] finalizePendingBooking: booking failed after claiming — reverting to pending so a retry can recover");
     await supabaseClient
