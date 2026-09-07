@@ -18,6 +18,17 @@ function createApiV1TasksRouter(supabaseClient, nettuClient) {
   router.get("/", async (req, res) => {
     try {
       const tasks = await taskSvc.listTasks(supabaseClient, req.staff.clinicId, req.staff.staffId);
+      // Best-effort, never fails the list itself — see notifyDueTasks's own
+      // comment for why this is the real safety net for a reminder that
+      // silently never got set (or nettu itself hiccuped). Runs on every
+      // fetch of this route, which the frontend now polls periodically, so
+      // a due task gets caught promptly rather than only when someone
+      // happens to open Tasks.
+      try {
+        await taskSvc.notifyDueTasks(supabaseClient, req.staff.clinicId, req.staff.staffId, req.log);
+      } catch (err) {
+        req.log?.warn({ err }, "[api-v1:tasks] notifyDueTasks pass failed");
+      }
       return ok(res, { tasks });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:tasks] list failed");

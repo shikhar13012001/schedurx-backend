@@ -1,7 +1,7 @@
 const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 
-const { createTask, toggleTask, deleteTask } = require("../../src/services/task-service");
+const { createTask, toggleTask, deleteTask, notifyDueTasks } = require("../../src/services/task-service");
 const { createTableStub } = require("../helpers/supabase-table-stub");
 
 function makeDoctor(overrides = {}) {
@@ -83,6 +83,112 @@ describe("createTask", () => {
 
     assert.equal(task.title, "Visit bank");
     assert.equal(task.schedulerEventId, undefined);
+  });
+
+  // Regression coverage for a live-reported bug (2026-09-08): a task whose
+  // reminder silently never got set looked identical to one that worked —
+  // reminderFailed is what lets the caller (the route, then the UI) tell
+  // the difference and actually say so, instead of staying silent.
+  test("reports reminderFailed:true when a dueAt was given but nettu genuinely fails", async () => {
+    const supabaseClient = createTableStub();
+    const task = await createTask(supabaseClient, {
+      clinicId: "clinic-1",
+      createdByStaffId: "staff-1",
+      title: "Visit bank",
+      dueAt: "2026-08-19T10:30:00.000Z",
+      nettuClient: makeNettu({ createFails: true }),
+      doctor: makeDoctor(),
+      log: { warn: () => {} },
+    });
+    assert.equal(task.reminderFailed, true);
+  });
+
+  test("reports reminderFailed:true when a dueAt was given but no doctor calendar could be resolved", async () => {
+    const supabaseClient = createTableStub();
+    const task = await createTask(supabaseClient, {
+      clinicId: "clinic-1",
+      createdByStaffId: "staff-1",
+      title: "Visit bank",
+      dueAt: "2026-08-19T10:30:00.000Z",
+      nettuClient: makeNettu(),
+      doctor: null,
+      log: { warn: () => {} },
+    });
+    assert.equal(task.reminderFailed, true);
+  });
+
+  test("reminderFailed is undefined (not false) when no dueAt was given at all — nothing to have failed", async () => {
+    const supabaseClient = createTableStub();
+    const task = await createTask(supabaseClient, {
+      clinicId: "clinic-1",
+      createdByStaffId: "staff-1",
+      title: "Call the lab",
+      nettuClient: makeNettu(),
+      doctor: makeDoctor(),
+    });
+    assert.equal(task.reminderFailed, undefined);
+  });
+
+  test("reminderFailed is false when the reminder was genuinely set", async () => {
+    const supabaseClient = createTableStub();
+    const task = await createTask(supabaseClient, {
+      clinicId: "clinic-1",
+      createdByStaffId: "staff-1",
+      title: "Visit bank",
+      dueAt: "2026-08-19T10:30:00.000Z",
+      nettuClient: makeNettu(),
+      doctor: makeDoctor(),
+    });
+    assert.equal(task.reminderFailed, false);
+  });
+});
+
+describe("notifyDueTasks", () => {
+  test("creates a reminder notification for an open task that's past its due time", async () => {
+    const supabaseClient = createTableStub({
+      Task: [
+        { id: "task-1", clinicId: "clinic-1", assignedStaffId: "staff-1", status: "open", title: "Call the lab", dueAt: new Date(Date.now() - 60_000).toISOString() },
+      ],
+    });
+    await notifyDueTasks(supabaseClient, "clinic-1", "staff-1", null);
+    const notifs = supabaseClient._tables.Notification ?? [];
+    assert.equal(notifs.length, 1);
+    assert.equal(notifs[0].type, "reminder");
+    assert.equal(notifs[0].data.taskId, "task-1");
+    assert.equal(notifs[0].body, "Call the lab");
+  });
+
+  test("does not notify a task that isn't due yet", async () => {
+    const supabaseClient = createTableStub({
+      Task: [
+        { id: "task-1", clinicId: "clinic-1", assignedStaffId: "staff-1", status: "open", title: "Call the lab", dueAt: new Date(Date.now() + 60 * 60_000).toISOString() },
+      ],
+    });
+    await notifyDueTasks(supabaseClient, "clinic-1", "staff-1", null);
+    assert.equal((supabaseClient._tables.Notification ?? []).length, 0);
+  });
+
+  test("does not re-notify a task that's already been flagged once", async () => {
+    const supabaseClient = createTableStub({
+      Task: [
+        { id: "task-1", clinicId: "clinic-1", assignedStaffId: "staff-1", status: "open", title: "Call the lab", dueAt: new Date(Date.now() - 60_000).toISOString() },
+      ],
+      Notification: [
+        { id: "notif-1", clinicId: "clinic-1", staffId: "staff-1", type: "reminder", data: { taskId: "task-1" }, createdAt: new Date().toISOString() },
+      ],
+    });
+    await notifyDueTasks(supabaseClient, "clinic-1", "staff-1", null);
+    assert.equal((supabaseClient._tables.Notification ?? []).length, 1); // unchanged
+  });
+
+  test("ignores a done task even if its dueAt has passed", async () => {
+    const supabaseClient = createTableStub({
+      Task: [
+        { id: "task-1", clinicId: "clinic-1", assignedStaffId: "staff-1", status: "done", title: "Call the lab", dueAt: new Date(Date.now() - 60_000).toISOString() },
+      ],
+    });
+    await notifyDueTasks(supabaseClient, "clinic-1", "staff-1", null);
+    assert.equal((supabaseClient._tables.Notification ?? []).length, 0);
   });
 });
 

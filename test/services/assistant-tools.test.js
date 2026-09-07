@@ -227,7 +227,7 @@ describe("find_next_free_slot", () => {
     return { async getBookingSlots() { return rawSlots; } };
   }
 
-  test("returns up to 5 upcoming slots, dropping any nettu returned in the past", async () => {
+  test("with no date given (open-ended 'when's my next opening' search), caps to 5 upcoming slots, dropping any nettu returned in the past", async () => {
     const past = Date.now() - 60 * 60 * 1000;
     const future = Date.now() + 3 * 60 * 60 * 1000;
     const tools = makeTools(createTableStub(makeTables()), {
@@ -239,6 +239,24 @@ describe("find_next_free_slot", () => {
     const result = await tools.find_next_free_slot.execute({ doctorId: "doc-1" });
     assert.equal(result.slots.length, 5, JSON.stringify(result));
     assert.ok(result.slots.every((s) => new Date(s.start).getTime() > Date.now()));
+  });
+
+  // Regression test for a live-reported bug (2026-09-08): asking "what are
+  // my next available slots" (today, a specific day) showed only ~75
+  // minutes of the day (5 slots at a 15-min cadence) even though the whole
+  // day was actually open — the flat 5-slot cap applied regardless of
+  // whether a specific day was requested. When `date` is given, every slot
+  // for that one day must come back, not just the first few.
+  test("with a specific date given, returns every slot for that day — no 5-slot cap", async () => {
+    const workingDay = nextDateWithWeekday("Sun", { avoid: true });
+    const dayStart = new Date(`${workingDay}T04:00:00Z`).getTime(); // well inside the working day regardless of timezone
+    const tools = makeTools(createTableStub(makeTables()), {
+      nettuClient: makeSlotNettuStub(
+        Array.from({ length: 20 }, (_, i) => ({ start: dayStart + i * 15 * 60 * 1000, duration: 15 * 60 * 1000 })),
+      ),
+    });
+    const result = await tools.find_next_free_slot.execute({ doctorId: "doc-1", date: workingDay });
+    assert.equal(result.slots.length, 20, JSON.stringify(result));
   });
 
   // Finds a date string near "today" matching the target weekday, using the

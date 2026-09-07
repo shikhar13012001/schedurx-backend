@@ -196,9 +196,21 @@ function buildAssistantTools({ supabaseClient, nettuClient, twilioClient, clinic
             { clinicId, doctorId, date },
             log,
           );
+          // getAvailableSlots already excludes booked appointments and
+          // blocked time (it's the same nettu-scheduler availability call
+          // the real booking flows use) — the only truncation was ever this
+          // line. Live-reported bug (2026-09-08): a flat slice(0, 5) made a
+          // fully-open day look like it had ~75 minutes of availability
+          // total, since 5 slots at a 15-min cadence only reaches that far.
+          // A single day's real slots are naturally bounded (a 9-6 day at
+          // 15-min increments is well under 50) — only cap when `date` was
+          // omitted and the search spans the whole open-ended booking
+          // window, where "the next slot" is the actual intent, not a full
+          // day's schedule.
+          const capped = date ? slots : slots.slice(0, 5);
           return {
             timezone,
-            slots: slots.slice(0, 5).map((s) => ({ start: s.start, end: s.end })),
+            slots: capped.map((s) => ({ start: s.start, end: s.end })),
             // Empty slots is ambiguous on its own — tell the model whether any
             // requested day is closed at the clinic level, so it can say that
             // plainly instead of guessing at "the calendar might be blocked".
