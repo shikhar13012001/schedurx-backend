@@ -173,8 +173,8 @@ function createApiV1VisitsRouter(supabaseClient, openaiClient, elevenLabsClient,
     if (!transcript?.trim()) return fail(res, 422, "MISSING_FIELDS", "transcript is required");
 
     try {
-      const suggestion = await openaiSvc.suggestDuringConsult(openaiClient, transcript);
-      return ok(res, { suggestion });
+      const { diagnosis, nextQuestion } = await openaiSvc.suggestDuringConsult(openaiClient, transcript);
+      return ok(res, { diagnosis, nextQuestion });
     } catch (err) {
       req.log?.error({ err }, "[api-v1:visits] suggest failed");
       return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);

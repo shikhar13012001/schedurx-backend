@@ -2353,7 +2353,7 @@ test("POST /api/v1/visits/suggest returns a grounded suggestion and never writes
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     Visit: [{ id: "visit_1", clinicId: "clinic-1", patientId: "pat_1", notes: null }],
   });
-  const openaiClient = createOpenaiStub({ content: JSON.stringify({ suggestion: "Consider asking about symptom duration." }) });
+  const openaiClient = createOpenaiStub({ content: JSON.stringify({ diagnosis: "Possible viral URI.", nextQuestion: "How long has the cough lasted?" }) });
   const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient });
 
   await withServer(app, async ({ request }) => {
@@ -2364,7 +2364,8 @@ test("POST /api/v1/visits/suggest returns a grounded suggestion and never writes
     });
     const body = await readJson(response);
     assert.equal(response.status, 200);
-    assert.equal(body.data.suggestion, "Consider asking about symptom duration.");
+    assert.equal(body.data.diagnosis, "Possible viral URI.");
+    assert.equal(body.data.nextQuestion, "How long has the cough lasted?");
   });
 
   assert.equal(supabaseClient._tables.Visit[0].notes, null, "suggest must never write to the Visit — purely advisory");

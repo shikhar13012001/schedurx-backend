@@ -27,22 +27,30 @@ describe("generateVisitNote", () => {
 });
 
 describe("suggestDuringConsult", () => {
-  test("returns the trimmed suggestion from a strict-JSON response", async () => {
-    const openaiClient = createOpenaiStub({ content: JSON.stringify({ suggestion: "  Consider asking about duration of symptoms.  " }) });
-    const suggestion = await openaiSvc.suggestDuringConsult(openaiClient, "Patient: I've had a cough for a while.");
-    assert.equal(suggestion, "Consider asking about duration of symptoms.");
+  test("returns the trimmed diagnosis and nextQuestion from a strict-JSON response", async () => {
+    const openaiClient = createOpenaiStub({
+      content: JSON.stringify({ diagnosis: "  Possible viral URI.  ", nextQuestion: "  How long has the cough lasted?  " }),
+    });
+    const result = await openaiSvc.suggestDuringConsult(openaiClient, "Patient: I've had a cough for a while.");
+    assert.deepEqual(result, { diagnosis: "Possible viral URI.", nextQuestion: "How long has the cough lasted?" });
   });
 
-  test("returns null (not a string) when the model has nothing to suggest yet", async () => {
-    const openaiClient = createOpenaiStub({ content: JSON.stringify({ suggestion: null }) });
-    const suggestion = await openaiSvc.suggestDuringConsult(openaiClient, "Doctor: Hello, how are you today?");
-    assert.equal(suggestion, null);
+  test("diagnosis and nextQuestion are independently nullable — one can be present without the other", async () => {
+    const openaiClient = createOpenaiStub({ content: JSON.stringify({ diagnosis: null, nextQuestion: "Any fever?" }) });
+    const result = await openaiSvc.suggestDuringConsult(openaiClient, "Patient: I've had a cough for a while.");
+    assert.deepEqual(result, { diagnosis: null, nextQuestion: "Any fever?" });
   });
 
-  test("returns null for an empty/whitespace-only suggestion instead of throwing", async () => {
-    const openaiClient = createOpenaiStub({ content: JSON.stringify({ suggestion: "   " }) });
-    const suggestion = await openaiSvc.suggestDuringConsult(openaiClient, "some transcript");
-    assert.equal(suggestion, null);
+  test("returns both null when the model has nothing to suggest yet", async () => {
+    const openaiClient = createOpenaiStub({ content: JSON.stringify({ diagnosis: null, nextQuestion: null }) });
+    const result = await openaiSvc.suggestDuringConsult(openaiClient, "Doctor: Hello, how are you today?");
+    assert.deepEqual(result, { diagnosis: null, nextQuestion: null });
+  });
+
+  test("treats an empty/whitespace-only field as null instead of throwing", async () => {
+    const openaiClient = createOpenaiStub({ content: JSON.stringify({ diagnosis: "   ", nextQuestion: "" }) });
+    const result = await openaiSvc.suggestDuringConsult(openaiClient, "some transcript");
+    assert.deepEqual(result, { diagnosis: null, nextQuestion: null });
   });
 
   test("throws AI_RESPONSE_INVALID on an unparseable response", async () => {
