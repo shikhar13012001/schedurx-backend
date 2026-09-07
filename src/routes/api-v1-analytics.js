@@ -44,6 +44,32 @@ function createApiV1AnalyticsRouter(supabaseClient, openaiClient) {
     }
   });
 
+  // GET /api/v1/analytics/enterprise?days=30 — financial, operational, and
+  // patient-level breakdowns beyond day_stats' single revenue/appointments/
+  // cancellations rollup (see analytics-service.js's own section comment
+  // for why each of these reads live tables directly instead of that view).
+  // One combined route rather than one-per-metric, matching this router's
+  // existing "one GET per screen's worth of data" shape.
+  router.get("/enterprise", async (req, res) => {
+    const days = Number(req.query.days) || 30;
+    const clinicId = req.staff.clinicId;
+    try {
+      const [revenueByDoctor, revenueByMode, outstanding, noShow, queueTimings, returnRateByDoctor, repeatVisitTrend] = await Promise.all([
+        analyticsSvc.getRevenueByDoctor(supabaseClient, clinicId, { days }),
+        analyticsSvc.getRevenueByMode(supabaseClient, clinicId, { days }),
+        analyticsSvc.getOutstandingInvoices(supabaseClient, clinicId),
+        analyticsSvc.getNoShowRate(supabaseClient, clinicId, { days }),
+        analyticsSvc.getQueueTimings(supabaseClient, clinicId, { days }),
+        analyticsSvc.getReturnRateByDoctor(supabaseClient, clinicId),
+        analyticsSvc.getRepeatVisitTrend(supabaseClient, clinicId, { months: 6 }),
+      ]);
+      return ok(res, { revenueByDoctor, revenueByMode, outstanding, noShow, queueTimings, returnRateByDoctor, repeatVisitTrend });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:analytics] enterprise failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
   router.post("/refresh", async (req, res) => {
     try {
       await analyticsSvc.refresh(supabaseClient);

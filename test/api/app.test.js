@@ -1963,6 +1963,35 @@ test("GET /api/v1/analytics/utilization computes possible vs booked slots per do
   });
 });
 
+test("GET /api/v1/analytics/enterprise returns real revenue/no-show/queue-timing/return-rate breakdowns in one call", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const now = new Date().toISOString();
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
+    Appointment: [{ id: "apt-1", clinicId: "clinic-1", doctorId: "doc-1", mode: "video", status: "no_show", timeslot: now }],
+    Invoice: [{ id: "inv-1", clinicId: "clinic-1", appointmentId: "apt-1", amountInr: 500, status: "paid", paidAt: now }],
+    QueueItem: [{ clinicId: "clinic-1", checkedInAt: now, calledAt: now, completedAt: now }],
+    Visit: [{ clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", visitDate: now.slice(0, 10) }],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/analytics/enterprise?days=30", { headers: { Authorization: "Bearer anything" } });
+    const body = await readJson(response);
+    assert.equal(response.status, 200);
+    assert.equal(body.data.revenueByDoctor[0].doctorId, "doc-1");
+    assert.equal(body.data.revenueByDoctor[0].amountInr, 500);
+    assert.equal(body.data.revenueByMode[0].mode, "video");
+    assert.equal(body.data.outstanding.count, 0);
+    assert.equal(body.data.noShow.noShows, 1);
+    assert.ok(Array.isArray(body.data.returnRateByDoctor));
+    assert.ok(Array.isArray(body.data.repeatVisitTrend));
+  });
+});
+
 test("GET /api/v1/analytics/practice-pulse is unavailable without an OpenAI client", async () => {
   const firebaseAdminApp = createFirebaseAdminStub({
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
