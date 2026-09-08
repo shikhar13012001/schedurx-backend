@@ -12,6 +12,7 @@
 // its functions, not another lifecycle trigger.
 
 const { normalizeIndianMobile } = require("../lib/phone");
+const { config } = require("../config");
 const tableSvc = require("./table-service");
 const callLogSvc = require("./call-log-service");
 const commsWorkflowSvc = require("./comms-workflow-service");
@@ -49,9 +50,21 @@ async function handleDeviceMissedCall(supabaseClient, twilioClient, { clinicId, 
     return { duplicate: true, patient };
   }
 
-  const { sent } = await commsWorkflowSvc.sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, normalizedPhone, log);
-  if (sent) {
-    await callLogSvc.updateCallLogOutcome(supabaseClient, callLog.id, "recovered_missed");
+  // DEVICE_MISSED_CALL_SEND_FOLLOWUP gates only this path — the Twilio
+  // carrier-forwarding path's own follow-up send is unconditional. Off by
+  // default so the on-device detection pipeline can be validated (CallLog
+  // row + Patient auto-create) without messaging real patients while testing.
+  let sent = false;
+  if (config.DEVICE_MISSED_CALL_SEND_FOLLOWUP) {
+    ({ sent } = await commsWorkflowSvc.sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, normalizedPhone, log));
+    if (sent) {
+      await callLogSvc.updateCallLogOutcome(supabaseClient, callLog.id, "recovered_missed");
+    }
+  } else {
+    log?.info(
+      { clinicId, phone: normalizedPhone, deviceCallTimestamp },
+      "[missedCallSvc] logging only — DEVICE_MISSED_CALL_SEND_FOLLOWUP is off, no WhatsApp send",
+    );
   }
 
   return { duplicate: false, callLog, patient, followUpSent: sent };
