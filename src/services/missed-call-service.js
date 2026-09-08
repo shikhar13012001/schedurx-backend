@@ -15,6 +15,7 @@ const { normalizeIndianMobile } = require("../lib/phone");
 const { config } = require("../config");
 const tableSvc = require("./table-service");
 const callLogSvc = require("./call-log-service");
+const staffSvc = require("./staff-service");
 const commsWorkflowSvc = require("./comms-workflow-service");
 
 // `phone` here is whatever the Android app read off the device's own call
@@ -58,9 +59,29 @@ async function handleDeviceMissedCall(supabaseClient, twilioClient, { clinicId, 
   // row + Patient auto-create) without messaging real patients while testing.
   let sent = false;
   if (config.DEVICE_MISSED_CALL_SEND_FOLLOWUP) {
-    ({ sent } = await commsWorkflowSvc.sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, normalizedPhone, log));
+    // Only resolves a doctor when this staff member's own account is linked
+    // to one (Staff.doctorId) — null for a receptionist or a doctor with no
+    // link set, which sendMissedCallFollowup already falls back to
+    // clinic-level attribution for.
+    const staff = staffId ? await staffSvc.getStaffById(supabaseClient, staffId) : null;
+    const result = await commsWorkflowSvc.sendMissedCallFollowup(
+      supabaseClient,
+      twilioClient,
+      clinicId,
+      normalizedPhone,
+      log,
+      staff?.doctorId ?? null,
+    );
+    sent = result.sent;
     if (sent) {
       await callLogSvc.updateCallLogOutcome(supabaseClient, callLog.id, "recovered_missed", "WhatsApp follow-up sent.");
+    } else if (result.rateLimited) {
+      await callLogSvc.updateCallLogOutcome(
+        supabaseClient,
+        callLog.id,
+        "missed_logged",
+        `Not sent — already messaged this number in the last ${config.MISSED_CALL_FOLLOWUP_COOLDOWN_HOURS}h.`,
+      );
     }
   } else {
     log?.info(

@@ -381,9 +381,14 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
         .select("*")
         .eq("twilioCallSid", callSid)
         .maybeSingle();
-      const clinicId =
-        callLog?.clinicId ??
-        (await phoneRouteSvc.resolveRoute(supabaseClient, phoneRouteSvc.resolveOriginalDestination(req)))?.clinicId;
+      // Resolved unconditionally (not just as a clinicId fallback) since
+      // it's also the only source of doctorId below — a doctor-specific
+      // PhoneNumberRoute (as opposed to a shared/clinic-wide one) is what
+      // lets sendMissedCallFollowup attribute the follow-up to that doctor
+      // instead of the clinic generally. CallLog itself has no doctorId
+      // column to fall back on.
+      const route = await phoneRouteSvc.resolveRoute(supabaseClient, phoneRouteSvc.resolveOriginalDestination(req));
+      const clinicId = callLog?.clinicId ?? route?.clinicId;
       if (!clinicId) return res.sendStatus(200);
 
       if (callLog) {
@@ -400,7 +405,7 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
       // up" status should trigger a follow-up — not every intermediate
       // ringing/in-progress callback Twilio sends for the same call.
       if (callStatus === "completed") {
-        await commsWorkflowSvc.sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, req.body?.From, req.log);
+        await commsWorkflowSvc.sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, req.body?.From, req.log, route?.doctorId ?? null);
       }
 
       res.sendStatus(200);

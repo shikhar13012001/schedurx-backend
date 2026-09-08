@@ -43,6 +43,12 @@ const schema = z.object({
     .optional()
     .transform((value) => value === "true"),
 
+  // Applies to BOTH missed-call paths (Twilio carrier-forwarding and the
+  // Android device path) — sendMissedCallFollowup is the one function both
+  // funnel through. Prevents messaging the same number more than once in
+  // this window even if they call (or get reported) multiple times.
+  MISSED_CALL_FOLLOWUP_COOLDOWN_HOURS: z.coerce.number().positive().default(2),
+
   // ── Firebase Admin (staff auth + RBAC) — /api/v1 stays unmounted unless project id,
   // client email, and one of the two private-key forms below are all set.
   FIREBASE_PROJECT_ID: z.string().optional(),

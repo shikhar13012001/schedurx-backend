@@ -5,6 +5,7 @@ const {
   buildDelayedReminderEntries,
   sendImmediateWorkflowMessages,
   sendDelayedWorkflowMessage,
+  sendMissedCallFollowup,
 } = require("../../src/services/comms-workflow-service");
 const { createTableStub } = require("../helpers/supabase-table-stub");
 const { createTwilioStub } = require("../helpers/twilio-stub");
@@ -480,5 +481,137 @@ describe("sendDelayedWorkflowMessage", () => {
     );
 
     assert.equal(twilioClient.calls.sendSms.length, 0);
+  });
+});
+
+describe("sendMissedCallFollowup", () => {
+  function missedCallClinic(overrides = {}) {
+    return makeClinic({
+      settings: {
+        communication: {
+          channelsEnabled: ["sms"],
+          workflows: [
+            {
+              id: "missed-call-sms",
+              trigger: "missed_call_followup",
+              channel: "sms",
+              offsetMinutes: 0,
+              enabled: true,
+              template: "Sorry we missed you at {{clinicName}}! Book here: {{bookingUrl}}",
+            },
+          ],
+        },
+      },
+      ...overrides,
+    });
+  }
+
+  test("sends with clinic-level attribution when no doctorId is given", async () => {
+    const supabaseClient = createTableStub({ Clinic: [missedCallClinic()] });
+    const twilioClient = createTwilioStub();
+
+    const result = await sendMissedCallFollowup(supabaseClient, twilioClient, "clinic-1", "+919888888888", null);
+
+    assert.deepEqual(result, { sent: true });
+    assert.equal(twilioClient.calls.sendSms.length, 1);
+    assert.match(twilioClient.calls.sendSms[0].body, /Sorry we missed you at Nirmaya Clinic!/);
+  });
+
+  test("sends with doctor-level attribution when a doctorId resolves", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [missedCallClinic()],
+      Doctor: [{ id: "doc_1", fullName: "Dr. Priya" }],
+    });
+    const twilioClient = createTwilioStub();
+
+    const result = await sendMissedCallFollowup(supabaseClient, twilioClient, "clinic-1", "+919888888888", null, "doc_1");
+
+    assert.deepEqual(result, { sent: true });
+    // The doctor's name replaces the clinic's in the same template slot —
+    // no new template variable, since the approved Content Template's
+    // placeholder count/copy can't change without new Meta approval.
+    assert.match(twilioClient.calls.sendSms[0].body, /Sorry we missed you at Dr\. Priya!/);
+    assert.doesNotMatch(twilioClient.calls.sendSms[0].body, /Nirmaya Clinic/);
+  });
+
+  test("appends ?doctor= to the booking link only when a doctorId is given", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [missedCallClinic()],
+      Doctor: [{ id: "doc_1", fullName: "Dr. Priya" }],
+    });
+    const twilioClient = createTwilioStub();
+    const priorPatientAppBaseUrl = require("../../src/config").config.PATIENT_APP_BASE_URL;
+    require("../../src/config").config.PATIENT_APP_BASE_URL = "https://book.example";
+
+    try {
+      await sendMissedCallFollowup(supabaseClient, twilioClient, "clinic-1", "+919888888888", null, "doc_1");
+      assert.match(twilioClient.calls.sendSms[0].body, /\?doctor=doc_1/);
+
+      twilioClient.calls.sendSms.length = 0;
+      await sendMissedCallFollowup(supabaseClient, twilioClient, "clinic-1", "+919888888888", null);
+      assert.doesNotMatch(twilioClient.calls.sendSms[0].body, /\?doctor=/);
+    } finally {
+      require("../../src/config").config.PATIENT_APP_BASE_URL = priorPatientAppBaseUrl;
+    }
+  });
+
+  test("skips the send when this number was already messaged within the cooldown window", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [missedCallClinic()],
+      CallLog: [
+        {
+          id: "call_prior",
+          clinicId: "clinic-1",
+          phone: "+919888888888",
+          outcome: "recovered_missed",
+          createdAt: new Date(Date.now() - 30 * 60_000).toISOString(), // 30 minutes ago
+        },
+      ],
+    });
+    const twilioClient = createTwilioStub();
+
+    const result = await sendMissedCallFollowup(supabaseClient, twilioClient, "clinic-1", "+919888888888", null);
+
+    assert.deepEqual(result, { sent: false, rateLimited: true });
+    assert.equal(twilioClient.calls.sendSms.length, 0);
+  });
+
+  test("sends again once the prior send falls outside the cooldown window", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [missedCallClinic()],
+      CallLog: [
+        {
+          id: "call_prior",
+          clinicId: "clinic-1",
+          phone: "+919888888888",
+          outcome: "recovered_missed",
+          createdAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(), // 3 hours ago — past the 2h default
+        },
+      ],
+    });
+    const twilioClient = createTwilioStub();
+
+    const result = await sendMissedCallFollowup(supabaseClient, twilioClient, "clinic-1", "+919888888888", null);
+
+    assert.deepEqual(result, { sent: true });
+    assert.equal(twilioClient.calls.sendSms.length, 1);
+  });
+
+  test("the cooldown is scoped per clinic and per phone number — doesn't cross-block unrelated ones", async () => {
+    const supabaseClient = createTableStub({
+      Clinic: [missedCallClinic(), missedCallClinic({ id: "clinic-2" })],
+      CallLog: [
+        { id: "call_a", clinicId: "clinic-1", phone: "+919888888888", outcome: "recovered_missed", createdAt: new Date().toISOString() },
+      ],
+    });
+    const twilioClient = createTwilioStub();
+
+    // Different phone, same clinic — not rate-limited.
+    const differentPhone = await sendMissedCallFollowup(supabaseClient, twilioClient, "clinic-1", "+919777777777", null);
+    assert.deepEqual(differentPhone, { sent: true });
+
+    // Same phone, different clinic — not rate-limited.
+    const differentClinic = await sendMissedCallFollowup(supabaseClient, twilioClient, "clinic-2", "+919888888888", null);
+    assert.deepEqual(differentClinic, { sent: true });
   });
 });

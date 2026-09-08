@@ -43,7 +43,9 @@
 
 const { makeId } = require("../lib/ids");
 const clinicSvc = require("./clinic-service");
+const doctorSvc = require("./doctor-service");
 const messagingSvc = require("./messaging-service");
+const callLogSvc = require("./call-log-service");
 const failedMessageSvc = require("./failed-message-service");
 const { renderTemplate } = require("../lib/template");
 const { formatHumanTime } = require("./availability-service");
@@ -297,8 +299,25 @@ async function sendDelayedWorkflowMessage({ supabaseClient, twilioClient, clinic
 // instead so a caller that cares (missed-call-service.js, to decide the
 // CallLog outcome) can tell success from a no-op (no workflow configured) or
 // a swallowed send failure.
-async function sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, callerPhone, log) {
+// doctorId is optional and best-effort — resolved by the caller when the
+// call came in on a doctor-specific line/phone (PhoneNumberRoute.doctorId
+// for the Twilio path, Staff.doctorId for the Android device path, when
+// that staff member's account is itself linked to a doctor). Null for a
+// shared/clinic-wide phone or route, which falls back to clinic-level
+// attribution exactly as before — there's no way to guess a doctor that was
+// never recorded anywhere.
+async function sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, callerPhone, log, doctorId = null) {
   if (!callerPhone) return { sent: false };
+
+  // Applies across both missed-call paths — see call-log-service.js's
+  // hasRecentRecoveredMissedCall for why this reads CallLog directly rather
+  // than keeping separate rate-limit state.
+  const cooldownSince = new Date(Date.now() - config.MISSED_CALL_FOLLOWUP_COOLDOWN_HOURS * 60 * 60_000).toISOString();
+  const recentlySent = await callLogSvc.hasRecentRecoveredMissedCall(supabaseClient, clinicId, callerPhone, cooldownSince);
+  if (recentlySent) {
+    log?.info({ clinicId, callerPhone }, "[commsWorkflowSvc] missed-call follow-up rate-limited — already sent within the cooldown window");
+    return { sent: false, rateLimited: true };
+  }
 
   const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
   const comms = clinic?.settings?.communication ?? {};
@@ -308,16 +327,29 @@ async function sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, ca
   );
   if (!workflow || !channelsEnabled.includes(workflow.channel)) return { sent: false };
 
+  // When a specific doctor is known, their name replaces the clinic's name
+  // in the same "who missed your call" template slot — not a new variable,
+  // since the approved Meta Content Template's fixed copy/placeholder count
+  // can't be changed without new template approval. The clinic-level values
+  // (phone, name for the fallback case) still come from Clinic either way.
+  const doctor = doctorId ? await doctorSvc.getDoctor(supabaseClient, doctorId) : null;
+  const attributedName = doctor?.fullName ?? clinic?.name;
+
   const from = workflow.channel === "whatsapp" ? clinic?.whatsappFrom : null;
   // Unlike booking_confirmed/reschedule's {{bookingUrl}} (an existing
   // appointment's manage link), there's no appointment yet here — this
   // points at the pre-booking entry point instead (the same
   // /{clinicId}/{phone} route schedurx-form-agent's IntakeForm already
-  // handles), pre-filling the caller's own number.
-  const bookingUrl = config.PATIENT_APP_BASE_URL ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${encodeURIComponent(callerPhone)}` : undefined;
+  // handles), pre-filling the caller's own number. ?doctor= preselects the
+  // doctor on that form when one's known — same query param IntakeForm
+  // already reads elsewhere (see app.js's /r/:token redirect).
+  const doctorQuery = doctorId ? `?doctor=${encodeURIComponent(doctorId)}` : "";
+  const bookingUrl = config.PATIENT_APP_BASE_URL
+    ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${encodeURIComponent(callerPhone)}${doctorQuery}`
+    : undefined;
   // Suffix-only form for Content Template URL buttons — see bookingUrlPath in
   // appointment-service.js for why the button variant can't just reuse bookingUrl.
-  const bookingUrlPath = `${clinicId}/${encodeURIComponent(callerPhone)}`;
+  const bookingUrlPath = `${clinicId}/${encodeURIComponent(callerPhone)}${doctorQuery}`;
   try {
     await messagingSvc.sendTemplatedMessage(
       {
@@ -328,7 +360,7 @@ async function sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, ca
         template: workflow.template,
         contentSid: workflow.contentSid,
         contentVariables: workflow.contentVariables,
-        data: { clinicName: clinic?.name, clinicPhone: clinic?.phone, bookingUrl, bookingUrlPath },
+        data: { clinicName: attributedName, clinicPhone: clinic?.phone, bookingUrl, bookingUrlPath },
         clinicId,
         purpose: "missed_call_followup",
       },

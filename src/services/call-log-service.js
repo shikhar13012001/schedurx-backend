@@ -127,6 +127,28 @@ async function createDeviceCallLog(
   return row;
 }
 
+// Rate-limit check for sendMissedCallFollowup (comms-workflow-service.js) —
+// shared by both missed-call paths, since a "don't message the same number
+// twice in a short window" rule doesn't care which detection path found the
+// call. Looks at CallLog itself rather than a separate rate-limit table:
+// every successful send already stamps outcome 'recovered_missed' on a
+// CallLog row, so that's already a complete, queryable send history with no
+// extra state to keep in sync. Exact phone match is safe here (unlike
+// Patient's suffix-tolerant lookup) since every caller into this always
+// normalizes through normalizeIndianMobile first.
+async function hasRecentRecoveredMissedCall(supabaseClient, clinicId, phone, sinceIso) {
+  const { data, error } = await supabaseClient
+    .from("CallLog")
+    .select("id")
+    .eq("clinicId", clinicId)
+    .eq("phone", phone)
+    .eq("outcome", "recovered_missed")
+    .gte("createdAt", sinceIso)
+    .limit(1);
+  if (error) throw dbErr(`checking recent missed-call follow-ups: ${error.message}`);
+  return (data ?? []).length > 0;
+}
+
 async function updateCallLogOutcome(supabaseClient, id, outcome, summary) {
   const updates = { outcome };
   if (summary !== undefined) updates.summary = summary;
@@ -150,6 +172,7 @@ module.exports = {
   createCallLog,
   upsertByTwilioCallSid,
   createDeviceCallLog,
+  hasRecentRecoveredMissedCall,
   updateCallLogOutcome,
   listWaLogs,
 };
