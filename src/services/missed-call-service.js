@@ -36,7 +36,9 @@ async function handleDeviceMissedCall(supabaseClient, twilioClient, { clinicId, 
     staffId,
     patientId: patient.id,
     phone: normalizedPhone,
-    outcome: "info",
+    name: patient.fullName || null,
+    summary: "Missed call detected on staff phone — reported by the ScheduRx app.",
+    outcome: "missed_logged",
     deviceCallTimestamp,
   });
   if (!callLog) {
@@ -58,7 +60,7 @@ async function handleDeviceMissedCall(supabaseClient, twilioClient, { clinicId, 
   if (config.DEVICE_MISSED_CALL_SEND_FOLLOWUP) {
     ({ sent } = await commsWorkflowSvc.sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, normalizedPhone, log));
     if (sent) {
-      await callLogSvc.updateCallLogOutcome(supabaseClient, callLog.id, "recovered_missed");
+      await callLogSvc.updateCallLogOutcome(supabaseClient, callLog.id, "recovered_missed", "WhatsApp follow-up sent.");
     }
   } else {
     log?.info(

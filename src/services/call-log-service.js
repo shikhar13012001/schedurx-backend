@@ -100,7 +100,7 @@ async function upsertByTwilioCallSid(
 // throwing — the caller (a duplicate report) is a routine no-op, not an error.
 async function createDeviceCallLog(
   supabaseClient,
-  { clinicId, staffId, patientId, phone, durationSec, outcome, deviceCallTimestamp },
+  { clinicId, staffId, patientId, phone, name, summary, durationSec, outcome, deviceCallTimestamp },
 ) {
   const { data: row, error } = await supabaseClient
     .from("CallLog")
@@ -109,9 +109,11 @@ async function createDeviceCallLog(
       clinicId,
       patientId: patientId ?? null,
       phone,
+      name: name ?? null,
+      summary: summary ?? null,
       staffId: staffId ?? null,
       durationSec: durationSec ?? 0,
-      outcome: outcome ?? "info",
+      outcome: outcome ?? "missed_logged",
       source: "android_native",
       deviceCallTimestamp,
       createdAt: new Date().toISOString(),
@@ -125,8 +127,10 @@ async function createDeviceCallLog(
   return row;
 }
 
-async function updateCallLogOutcome(supabaseClient, id, outcome) {
-  const { error } = await supabaseClient.from("CallLog").update({ outcome }).eq("id", id);
+async function updateCallLogOutcome(supabaseClient, id, outcome, summary) {
+  const updates = { outcome };
+  if (summary !== undefined) updates.summary = summary;
+  const { error } = await supabaseClient.from("CallLog").update(updates).eq("id", id);
   if (error) throw dbErr(`updating call log outcome: ${error.message}`);
 }
 
