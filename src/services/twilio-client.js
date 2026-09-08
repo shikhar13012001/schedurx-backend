@@ -45,9 +45,14 @@ function createTwilioClient({ accountSid, authToken, smsFrom, whatsappFrom, stat
     // send a Meta-approved Content Template instead of free text — required
     // for any business-initiated WhatsApp send outside a 24h user session
     // (see comms-workflow-service.js). body is ignored when contentSid is set.
+    // mediaUrl (an array of URLs) attaches real media — an image/PDF that
+    // renders with a native inline preview instead of a tappable link. Only
+    // valid free-form (inside an open user session, same as body) — Twilio
+    // fetches each URL itself and re-hosts the bytes to WhatsApp, so the URL
+    // only needs to be reachable by Twilio at send time, not durable.
     // clinicId/purpose are optional context for delivery-status logging
     // only — never sent to Twilio.
-    async sendSms({ to, from, body, contentSid, contentVariables, clinicId, purpose }) {
+    async sendSms({ to, from, body, contentSid, contentVariables, mediaUrl, clinicId, purpose }) {
       const payload = { to, from: from ?? smsFrom };
       if (contentSid) {
         payload.contentSid = contentSid;
@@ -55,6 +60,7 @@ function createTwilioClient({ accountSid, authToken, smsFrom, whatsappFrom, stat
       } else {
         payload.body = body;
       }
+      if (mediaUrl?.length) payload.mediaUrl = mediaUrl;
       if (statusCallback) payload.statusCallback = statusCallback;
       const result = await client.messages.create(payload);
       logSent(result, { channel: "sms", to, clinicId, purpose });
@@ -63,7 +69,7 @@ function createTwilioClient({ accountSid, authToken, smsFrom, whatsappFrom, stat
 
     // `to`/`from` are plain E.164 numbers — the whatsapp: scheme prefix is an
     // implementation detail of this wrapper, not something callers should know.
-    async sendWhatsApp({ to, from, body, contentSid, contentVariables, clinicId, purpose }) {
+    async sendWhatsApp({ to, from, body, contentSid, contentVariables, mediaUrl, clinicId, purpose }) {
       const payload = { to: `whatsapp:${to}`, from: `whatsapp:${from ?? whatsappFrom}` };
       if (contentSid) {
         payload.contentSid = contentSid;
@@ -71,6 +77,7 @@ function createTwilioClient({ accountSid, authToken, smsFrom, whatsappFrom, stat
       } else {
         payload.body = body;
       }
+      if (mediaUrl?.length) payload.mediaUrl = mediaUrl;
       if (statusCallback) payload.statusCallback = statusCallback;
       const result = await client.messages.create(payload);
       logSent(result, { channel: "whatsapp", to, clinicId, purpose });

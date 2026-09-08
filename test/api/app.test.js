@@ -522,23 +522,42 @@ test("POST /api/v1/appointments/block sends the doctor-unavailable rebook notice
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     Clinic: [
       {
-        id: "clinic-1", status: "active", name: "Nirmaya Clinic", phone: "+919999999999",
-        schedulerServiceId: "svc-001", timezone: "Asia/Kolkata", openingHour: 9, closingHour: 18,
-        minNoticeHours: 0, maxBookingWindowDays: 30, cancellationCutoffHours: 0,
+        id: "clinic-1",
+        status: "active",
+        name: "Nirmaya Clinic",
+        phone: "+919999999999",
+        schedulerServiceId: "svc-001",
+        timezone: "Asia/Kolkata",
+        openingHour: 9,
+        closingHour: 18,
+        minNoticeHours: 0,
+        maxBookingWindowDays: 30,
+        cancellationCutoffHours: 0,
       },
     ],
     Doctor: [
       {
-        id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true,
-        schedulerDoctorId: "n-doc-1", schedulerCalendarId: "n-cal-1",
-        workingHoursStart: "09:00", workingHoursEnd: "18:00",
+        id: "doc-1",
+        clinicId: "clinic-1",
+        fullName: "Dr. Priya",
+        isActive: true,
+        schedulerDoctorId: "n-doc-1",
+        schedulerCalendarId: "n-cal-1",
+        workingHoursStart: "09:00",
+        workingHoursEnd: "18:00",
       },
     ],
     Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
     Appointment: [
       {
-        id: "apt_conflict", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1",
-        timeslot: FUTURE_START, durationMinutes: 30, status: "booked", auditHistory: [],
+        id: "apt_conflict",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        patientId: "pat-1",
+        timeslot: FUTURE_START,
+        durationMinutes: 30,
+        status: "booked",
+        auditHistory: [],
       },
     ],
   });
@@ -551,7 +570,14 @@ test("POST /api/v1/appointments/block sends the doctor-unavailable rebook notice
     },
   };
   const twilioClient = createTwilioStub();
-  const app = createApp({ supabaseClient, nettuClient, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/appointments/block", {
@@ -585,29 +611,69 @@ test("POST /api/v1/appointments/reorder-day actually swaps two appointments' rea
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1", doctorId: "doc-1" }],
     Clinic: [
       {
-        id: "clinic-1", status: "active", name: "Nirmaya Clinic", schedulerServiceId: "svc-001",
-        timezone: "Asia/Kolkata", openingHour: 9, closingHour: 18, minNoticeHours: 0,
-        maxBookingWindowDays: 30, cancellationCutoffHours: 0, rescheduleCutoffHours: 48,
+        id: "clinic-1",
+        status: "active",
+        name: "Nirmaya Clinic",
+        schedulerServiceId: "svc-001",
+        timezone: "Asia/Kolkata",
+        openingHour: 9,
+        closingHour: 18,
+        minNoticeHours: 0,
+        maxBookingWindowDays: 30,
+        cancellationCutoffHours: 0,
+        rescheduleCutoffHours: 48,
       },
     ],
     Doctor: [
       {
-        id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true,
-        schedulerDoctorId: "n-doc-1", schedulerCalendarId: "n-cal-1",
-        workingHoursStart: "09:00", workingHoursEnd: "18:00",
+        id: "doc-1",
+        clinicId: "clinic-1",
+        fullName: "Dr. Priya",
+        isActive: true,
+        schedulerDoctorId: "n-doc-1",
+        schedulerCalendarId: "n-cal-1",
+        workingHoursStart: "09:00",
+        workingHoursEnd: "18:00",
       },
     ],
     Appointment: [
-      { id: "apt_a", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T1, durationMinutes: 30, status: "booked", auditHistory: [] },
-      { id: "apt_b", clinicId: "clinic-1", doctorId: "doc-1", timeslot: T2, durationMinutes: 30, status: "booked", auditHistory: [] },
+      {
+        id: "apt_a",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        timeslot: T1,
+        durationMinutes: 30,
+        status: "booked",
+        auditHistory: [],
+      },
+      {
+        id: "apt_b",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        timeslot: T2,
+        durationMinutes: 30,
+        status: "booked",
+        auditHistory: [],
+      },
     ],
   });
   const nettuClient = {
-    async createEvent() { return { id: "nettu-event-reorder" }; },
-    async deleteEvent() { return {}; },
+    async createEvent() {
+      return { id: "nettu-event-reorder" };
+    },
+    async deleteEvent() {
+      return {};
+    },
   };
   const twilioClient = createTwilioStub();
-  const app = createApp({ supabaseClient, nettuClient, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/appointments/reorder-day", {
@@ -720,7 +786,11 @@ test("POST /api/v1/appointments with tokenRequested holds the slot, sends the pa
     assert.ok(body.data.pendingBookingId.startsWith("pbk_"));
   });
 
-  assert.equal((supabaseClient._tables.Appointment ?? []).length, 0, "no Appointment must exist until Stripe confirms payment");
+  assert.equal(
+    (supabaseClient._tables.Appointment ?? []).length,
+    0,
+    "no Appointment must exist until Stripe confirms payment",
+  );
   assert.equal(supabaseClient._tables.PendingBooking.length, 1);
   assert.equal(twilioClient.calls.sendWhatsApp.length, 1);
   // Business-initiated via the approved booking_payment_request_v1 Content
@@ -804,7 +874,13 @@ test("GET /api/v1/public/pending-bookings/:id returns a public-safe summary", as
       },
     ],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const missingClinic = await request("/api/v1/public/pending-bookings/pbk_1");
@@ -855,7 +931,11 @@ test("POST /api/v1/public/pending-bookings/:id/checkout-session creates a fresh 
     const response = await request("/api/v1/public/pending-bookings/pbk_1/checkout-session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clinicId: "clinic-1", successUrl: "https://example.com/ok", cancelUrl: "https://example.com/cancel" }),
+      body: JSON.stringify({
+        clinicId: "clinic-1",
+        successUrl: "https://example.com/ok",
+        cancelUrl: "https://example.com/cancel",
+      }),
     });
     const body = await readJson(response);
     assert.equal(response.status, 200);
@@ -875,7 +955,11 @@ test("POST /api/v1/public/pending-bookings/:id/checkout-session creates a fresh 
     const response = await request("/api/v1/public/pending-bookings/pbk_1/checkout-session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clinicId: "clinic-1", successUrl: "https://example.com/ok", cancelUrl: "https://example.com/cancel" }),
+      body: JSON.stringify({
+        clinicId: "clinic-1",
+        successUrl: "https://example.com/ok",
+        cancelUrl: "https://example.com/cancel",
+      }),
     });
     assert.equal(response.status, 409);
   });
@@ -957,7 +1041,11 @@ test("POST /webhooks/stripe checkout.session.completed with a pendingBookingId f
         timeslot: TOKEN_FUTURE_START,
         durationMinutes: 30,
         amountPaise: 20000,
-        bookingParams: { patientId: null, patient: { name: "Test Patient", phone: "+919999999999" }, source: "patient_web" },
+        bookingParams: {
+          patientId: null,
+          patient: { name: "Test Patient", phone: "+919999999999" },
+          source: "patient_web",
+        },
         status: "pending",
       },
     ],
@@ -1185,11 +1273,37 @@ test("POST /api/v1/threads/find-or-create still works when the patient also has 
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     Patient: [{ id: "pat_1", clinicId: "clinic-1", fullName: "Rahul", contactNumber: "+919999999999" }],
     Thread: [
-      { id: "thread_general", clinicId: "clinic-1", patientId: "pat_1", channel: "whatsapp", contactPhone: "+919999999999", status: "open", unreadCount: 0, scope: "general" },
-      { id: "thread_booking", clinicId: "clinic-1", patientId: "pat_1", doctorId: "doc-1", appointmentId: "apt_1", channel: "whatsapp", contactPhone: "+919999999999", status: "open", unreadCount: 0, scope: "booking" },
+      {
+        id: "thread_general",
+        clinicId: "clinic-1",
+        patientId: "pat_1",
+        channel: "whatsapp",
+        contactPhone: "+919999999999",
+        status: "open",
+        unreadCount: 0,
+        scope: "general",
+      },
+      {
+        id: "thread_booking",
+        clinicId: "clinic-1",
+        patientId: "pat_1",
+        doctorId: "doc-1",
+        appointmentId: "apt_1",
+        channel: "whatsapp",
+        contactPhone: "+919999999999",
+        status: "open",
+        unreadCount: 0,
+        scope: "booking",
+      },
     ],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/threads/find-or-create", {
@@ -1713,12 +1827,32 @@ test("GET /api/v1/messaging/failures scopes to the authenticated staff member's 
   const supabaseClient = createTableStub({
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     MessageLog: [
-      { id: "msglog_1", clinicId: "clinic-1", providerSid: "SM1", channel: "whatsapp", status: "undelivered", createdAt: now },
+      {
+        id: "msglog_1",
+        clinicId: "clinic-1",
+        providerSid: "SM1",
+        channel: "whatsapp",
+        status: "undelivered",
+        createdAt: now,
+      },
       { id: "msglog_2", clinicId: "clinic-1", providerSid: "SM2", channel: "sms", status: "delivered", createdAt: now },
-      { id: "msglog_3", clinicId: "clinic-2", providerSid: "SM3", channel: "whatsapp", status: "failed", createdAt: now },
+      {
+        id: "msglog_3",
+        clinicId: "clinic-2",
+        providerSid: "SM3",
+        channel: "whatsapp",
+        status: "failed",
+        createdAt: now,
+      },
     ],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/messaging/failures", { headers: { Authorization: "Bearer anything" } });
@@ -1738,25 +1872,58 @@ test("GET /api/v1/messaging/retry-queue scopes to the clinic and excludes resolv
   const supabaseClient = createTableStub({
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     FailedMessage: [
-      { id: "fmsg_1", clinicId: "clinic-1", channel: "sms", toPhone: "+919888888888", status: "pending", createdAt: now },
-      { id: "fmsg_2", clinicId: "clinic-1", channel: "whatsapp", toPhone: "+919888888889", status: "exhausted", createdAt: now },
-      { id: "fmsg_3", clinicId: "clinic-1", channel: "sms", toPhone: "+919888888890", status: "resolved", createdAt: now },
-      { id: "fmsg_4", clinicId: "clinic-2", channel: "sms", toPhone: "+919888888891", status: "pending", createdAt: now },
+      {
+        id: "fmsg_1",
+        clinicId: "clinic-1",
+        channel: "sms",
+        toPhone: "+919888888888",
+        status: "pending",
+        createdAt: now,
+      },
+      {
+        id: "fmsg_2",
+        clinicId: "clinic-1",
+        channel: "whatsapp",
+        toPhone: "+919888888889",
+        status: "exhausted",
+        createdAt: now,
+      },
+      {
+        id: "fmsg_3",
+        clinicId: "clinic-1",
+        channel: "sms",
+        toPhone: "+919888888890",
+        status: "resolved",
+        createdAt: now,
+      },
+      {
+        id: "fmsg_4",
+        clinicId: "clinic-2",
+        channel: "sms",
+        toPhone: "+919888888891",
+        status: "pending",
+        createdAt: now,
+      },
     ],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/messaging/retry-queue", { headers: { Authorization: "Bearer anything" } });
     const body = await readJson(response);
 
     assert.equal(response.status, 200);
-    assert.deepEqual(
-      body.data.queue.map((q) => q.id).sort(),
-      ["fmsg_1", "fmsg_2"],
-    );
+    assert.deepEqual(body.data.queue.map((q) => q.id).sort(), ["fmsg_1", "fmsg_2"]);
 
-    const exhaustedOnly = await request("/api/v1/messaging/retry-queue?status=exhausted", { headers: { Authorization: "Bearer anything" } });
+    const exhaustedOnly = await request("/api/v1/messaging/retry-queue?status=exhausted", {
+      headers: { Authorization: "Bearer anything" },
+    });
     const exhaustedBody = await readJson(exhaustedOnly);
     assert.equal(exhaustedBody.data.queue.length, 1);
     assert.equal(exhaustedBody.data.queue[0].id, "fmsg_2");
@@ -1775,16 +1942,30 @@ test("GET /api/v1/queue bundles the active queue with possible-no-show candidate
     QueueItem: [{ id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", status: "waiting", position: 1 }],
     Appointment: [
       {
-        id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked",
+        id: "apt_1",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        patientId: "pat-1",
+        status: "booked",
         timeslot: new Date(Date.now() - 60 * 60_000).toISOString(), // 1h ago — past default grace
       },
       {
-        id: "apt_2", clinicId: "clinic-2", doctorId: "doc-2", patientId: "pat-2", status: "booked",
+        id: "apt_2",
+        clinicId: "clinic-2",
+        doctorId: "doc-2",
+        patientId: "pat-2",
+        status: "booked",
         timeslot: new Date(Date.now() - 60 * 60_000).toISOString(), // different clinic — must not leak in
       },
     ],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/queue", { headers: { Authorization: "Bearer anything" } });
@@ -1793,7 +1974,10 @@ test("GET /api/v1/queue bundles the active queue with possible-no-show candidate
     assert.equal(response.status, 200);
     assert.equal(body.data.queue.length, 1);
     assert.equal(body.data.queue[0].id, "q_1");
-    assert.deepEqual(body.data.possibleNoShows.map((a) => a.id), ["apt_1"]);
+    assert.deepEqual(
+      body.data.possibleNoShows.map((a) => a.id),
+      ["apt_1"],
+    );
   });
 });
 
@@ -1805,7 +1989,13 @@ test("POST /api/v1/queue/walk-in with an appointmentId checks the booking in —
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/queue/walk-in", {
@@ -1828,11 +2018,21 @@ test("POST /api/v1/queue/confirm-no-show marks the appointment no_show and scope
   });
   const supabaseClient = createTableStub({
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
-    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", settings: { communication: { channelsEnabled: [], workflows: [] } } }],
+    Clinic: [
+      { id: "clinic-1", name: "Nirmaya Clinic", settings: { communication: { channelsEnabled: [], workflows: [] } } },
+    ],
     Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Rahul", contactNumber: "+919888888888" }],
-    Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked", auditHistory: [] }],
+    Appointment: [
+      { id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked", auditHistory: [] },
+    ],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/queue/confirm-no-show", {
@@ -1855,7 +2055,16 @@ test("POST /api/v1/queue/confirm-no-show marks the appointment no_show and scope
   const otherApp = createApp({
     supabaseClient: createTableStub({
       Staff: [{ id: "staff-2", firebaseUid: "staff-2", clinicId: "clinic-2" }],
-      Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked", auditHistory: [] }],
+      Appointment: [
+        {
+          id: "apt_1",
+          clinicId: "clinic-1",
+          doctorId: "doc-1",
+          patientId: "pat-1",
+          status: "booked",
+          auditHistory: [],
+        },
+      ],
     }),
     nettuClient: null,
     firebaseAdminApp: otherFirebaseAdminApp,
@@ -1971,15 +2180,27 @@ test("GET /api/v1/analytics/enterprise returns real revenue/no-show/queue-timing
   const supabaseClient = createTableStub({
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
-    Appointment: [{ id: "apt-1", clinicId: "clinic-1", doctorId: "doc-1", mode: "video", status: "no_show", timeslot: now }],
-    Invoice: [{ id: "inv-1", clinicId: "clinic-1", appointmentId: "apt-1", amountInr: 500, status: "paid", paidAt: now }],
+    Appointment: [
+      { id: "apt-1", clinicId: "clinic-1", doctorId: "doc-1", mode: "video", status: "no_show", timeslot: now },
+    ],
+    Invoice: [
+      { id: "inv-1", clinicId: "clinic-1", appointmentId: "apt-1", amountInr: 500, status: "paid", paidAt: now },
+    ],
     QueueItem: [{ clinicId: "clinic-1", checkedInAt: now, calledAt: now, completedAt: now }],
     Visit: [{ clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", visitDate: now.slice(0, 10) }],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
-    const response = await request("/api/v1/analytics/enterprise?days=30", { headers: { Authorization: "Bearer anything" } });
+    const response = await request("/api/v1/analytics/enterprise?days=30", {
+      headers: { Authorization: "Bearer anything" },
+    });
     const body = await readJson(response);
     assert.equal(response.status, 200);
     assert.equal(body.data.revenueByDoctor[0].doctorId, "doc-1");
@@ -2054,7 +2275,13 @@ test("POST /api/v1/visits is idempotent — calling it twice for the same patien
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
   });
   const supabaseClient = createTableStub({ Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }] });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const body = { patientId: "pat_1", doctorId: "doc_1", symptoms: "Fever" };
@@ -2073,7 +2300,11 @@ test("POST /api/v1/visits is idempotent — calling it twice for the same patien
     assert.equal(firstBody.data.visit.id, secondBody.data.visit.id);
   });
 
-  assert.equal(supabaseClient._tables.Visit.length, 1, "a second call for the same patient/day must not create a second row");
+  assert.equal(
+    supabaseClient._tables.Visit.length,
+    1,
+    "a second call for the same patient/day must not create a second row",
+  );
 });
 
 // ─── /api/v1/visits/:id/upload-url, /attachments ────────────────────────────────
@@ -2164,13 +2395,22 @@ test("POST /api/v1/visits/:id/attachments/send messages the patient a link and m
     Patient: [{ id: "pat_1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
     Visit: [
       {
-        id: "visit_1", clinicId: "clinic-1", patientId: "pat_1",
+        id: "visit_1",
+        clinicId: "clinic-1",
+        patientId: "pat_1",
         rxAttachments: [{ path: "clinic-1/visit_1/rx.jpg", type: "photo", uploadedAt: new Date().toISOString() }],
       },
     ],
   });
   const twilioClient = createTwilioStub();
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/visits/visit_1/attachments/send", {
@@ -2187,6 +2427,13 @@ test("POST /api/v1/visits/:id/attachments/send messages the patient a link and m
   assert.ok(sent, "expected a WhatsApp send to the patient");
   assert.match(sent.body, /Rahul.*prescription photo/s);
 
+  // The attachment must go out as native media on our own domain — never a
+  // Supabase Storage URL (the exact "don't expose the supabase url" ask).
+  assert.equal(sent.mediaUrl?.length, 1);
+  assert.match(sent.mediaUrl[0], /^https:\/\/api\.schedurx\.example\/rx\//);
+  assert.doesNotMatch(sent.body, /supabase/i);
+  assert.doesNotMatch(sent.body, /http/i);
+
   const threadRows = supabaseClient._tables.Thread ?? [];
   assert.equal(threadRows.length, 1, "expected exactly one thread to be created/reused");
 });
@@ -2201,7 +2448,14 @@ test("POST /api/v1/visits/:id/attachments/send 404s for a path that isn't a real
     Visit: [{ id: "visit_1", clinicId: "clinic-1", patientId: "pat_1", rxAttachments: [] }],
   });
   const twilioClient = createTwilioStub();
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/visits/visit_1/attachments/send", {
@@ -2279,7 +2533,7 @@ test("POST /api/v1/visits/:id/recap saves the recording as an audio attachment w
   const visit = supabaseClient._tables.Visit.find((v) => v.id === "visit_1");
   assert.deepEqual(
     visit.rxAttachments.map((a) => a.type),
-    ["audio"]
+    ["audio"],
   );
 });
 
@@ -2350,7 +2604,14 @@ test("GET /api/v1/visits/scribe-token returns a single-use token without ever ex
   });
   const supabaseClient = createTableStub({ Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }] });
   const elevenLabsClient = { mintRealtimeScribeToken: async () => "elevenlabs-single-use-token-xyz" };
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null, elevenLabsClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+    elevenLabsClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/visits/scribe-token", { headers: { Authorization: "Bearer anything" } });
@@ -2366,7 +2627,13 @@ test("GET /api/v1/visits/scribe-token is unavailable without an ElevenLabs clien
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
   });
   const supabaseClient = createTableStub({ Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }] });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/visits/scribe-token", { headers: { Authorization: "Bearer anything" } });
@@ -2382,7 +2649,9 @@ test("POST /api/v1/visits/suggest returns a grounded suggestion and never writes
     Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
     Visit: [{ id: "visit_1", clinicId: "clinic-1", patientId: "pat_1", notes: null }],
   });
-  const openaiClient = createOpenaiStub({ content: JSON.stringify({ diagnosis: "Possible viral URI.", nextQuestion: "How long has the cough lasted?" }) });
+  const openaiClient = createOpenaiStub({
+    content: JSON.stringify({ diagnosis: "Possible viral URI.", nextQuestion: "How long has the cough lasted?" }),
+  });
   const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient });
 
   await withServer(app, async ({ request }) => {
@@ -2423,7 +2692,13 @@ test("POST /api/v1/visits/suggest is unavailable without an OpenAI client", asyn
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
   });
   const supabaseClient = createTableStub({ Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }] });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/visits/suggest", {
@@ -2866,10 +3141,19 @@ test("POST /webhooks/twilio/voice-status skips the follow-up when no workflow is
 
 test("POST /webhooks/twilio/message-status updates the matching MessageLog row with the real delivery outcome", async () => {
   const supabaseClient = createTableStub({
-    MessageLog: [{ id: "msglog_1", providerSid: "SM123", status: "sent", channel: "whatsapp", purpose: "booking_confirmed" }],
+    MessageLog: [
+      { id: "msglog_1", providerSid: "SM123", status: "sent", channel: "whatsapp", purpose: "booking_confirmed" },
+    ],
   });
   const twilioClient = createTwilioStub();
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/webhooks/twilio/message-status", {
@@ -2888,7 +3172,14 @@ test("POST /webhooks/twilio/message-status updates the matching MessageLog row w
 test("POST /webhooks/twilio/message-status still returns 200 for a sid it never logged", async () => {
   const supabaseClient = createTableStub({ MessageLog: [] });
   const twilioClient = createTwilioStub();
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/webhooks/twilio/message-status", {
@@ -2998,14 +3289,28 @@ test("POST /webhooks/twilio/whatsapp-inbound auto-escalates with a clinic-wide b
     Notification: [],
   });
   const twilioClient = createTwilioStub();
-  const openaiClient = createOpenaiStub({ content: JSON.stringify({ triage: "critical", summary: "Patient reports chest pain." }) });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient, twilioClient });
+  const openaiClient = createOpenaiStub({
+    content: JSON.stringify({ triage: "critical", summary: "Patient reports chest pain." }),
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/webhooks/twilio/whatsapp-inbound", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "chest pain", MessageSid: "SM-esc-1" }),
+      body: formBody({
+        From: "whatsapp:+919888888888",
+        To: "whatsapp:+19789069398",
+        Body: "chest pain",
+        MessageSid: "SM-esc-1",
+      }),
     });
     assert.equal(response.status, 200);
   });
@@ -3023,8 +3328,17 @@ test("POST /webhooks/twilio/whatsapp-inbound does not re-escalate an already-cri
     Notification: [],
   });
   const twilioClient = createTwilioStub();
-  const openaiClient = createOpenaiStub({ content: JSON.stringify({ triage: "critical", summary: "Still critical." }) });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient, twilioClient });
+  const openaiClient = createOpenaiStub({
+    content: JSON.stringify({ triage: "critical", summary: "Still critical." }),
+  });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const fields = { From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "chest pain" };
@@ -3040,7 +3354,11 @@ test("POST /webhooks/twilio/whatsapp-inbound does not re-escalate an already-cri
     });
   });
 
-  assert.equal(supabaseClient._tables.Notification.length, 1, "a second critical classification on the same thread must not create a duplicate escalation");
+  assert.equal(
+    supabaseClient._tables.Notification.length,
+    1,
+    "a second critical classification on the same thread must not create a duplicate escalation",
+  );
 });
 
 test("POST /webhooks/twilio/whatsapp-inbound auto-escalates a booking-scoped thread turning critical directly to the assigned doctor", async () => {
@@ -3049,18 +3367,32 @@ test("POST /webhooks/twilio/whatsapp-inbound auto-escalates a booking-scoped thr
     Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
     Staff: [{ id: "staff-doc-1", clinicId: "clinic-1", doctorId: "doc-1", role: "doctor" }],
     Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919888888888" }],
-    Appointment: [{ id: "apt_booking_esc", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+    Appointment: [
+      { id: "apt_booking_esc", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" },
+    ],
     Notification: [],
   });
   const twilioClient = createTwilioStub();
   const openaiClient = createOpenaiStub({ content: JSON.stringify({ triage: "critical", summary: "Urgent." }) });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient,
+    twilioClient,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/webhooks/twilio/whatsapp-inbound", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+10000000000", Body: "BOOKING apt_booking_esc", MessageSid: "SM-esc-c" }),
+      body: formBody({
+        From: "whatsapp:+919888888888",
+        To: "whatsapp:+10000000000",
+        Body: "BOOKING apt_booking_esc",
+        MessageSid: "SM-esc-c",
+      }),
     });
     assert.equal(response.status, 200);
   });
@@ -3136,7 +3468,9 @@ test("POST /webhooks/twilio/whatsapp-inbound with a BOOKING deep link attaches a
     Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
     Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
     Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919888888888" }],
-    Appointment: [{ id: "apt_booking_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+    Appointment: [
+      { id: "apt_booking_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" },
+    ],
   });
   const twilioClient = createTwilioStub();
   const app = createApp({
@@ -3154,7 +3488,12 @@ test("POST /webhooks/twilio/whatsapp-inbound with a BOOKING deep link attaches a
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
       // Deliberately a "To" number that owns no clinic — proves this resolved
       // via the appointment id, not the normal whatsappFrom lookup.
-      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+10000000000", Body: "BOOKING apt_booking_1", MessageSid: "SM-booking-1" }),
+      body: formBody({
+        From: "whatsapp:+919888888888",
+        To: "whatsapp:+10000000000",
+        Body: "BOOKING apt_booking_1",
+        MessageSid: "SM-booking-1",
+      }),
     });
     assert.equal(response.status, 200);
   });
@@ -3189,13 +3528,25 @@ test("POST /webhooks/twilio/whatsapp-inbound structured fallback links to the ap
     ],
   });
   const twilioClient = createTwilioStub();
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
 
   const bookingReply = await withServer(app, async ({ request }) => {
     const response = await request("/webhooks/twilio/whatsapp-inbound", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+10000000000", Body: "BOOKING apt_booking_2", MessageSid: "SM-booking-3" }),
+      body: formBody({
+        From: "whatsapp:+919888888888",
+        To: "whatsapp:+10000000000",
+        Body: "BOOKING apt_booking_2",
+        MessageSid: "SM-booking-3",
+      }),
     });
     return response.text();
   });
@@ -3213,7 +3564,12 @@ test("POST /webhooks/twilio/whatsapp-inbound structured fallback links to the ap
     const response = await request("/webhooks/twilio/whatsapp-inbound", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "Hi there", MessageSid: "SM-general-1" }),
+      body: formBody({
+        From: "whatsapp:+919888888888",
+        To: "whatsapp:+19789069398",
+        Body: "Hi there",
+        MessageSid: "SM-general-1",
+      }),
     });
     return response.text();
   });
@@ -3227,13 +3583,25 @@ test("POST /webhooks/twilio/whatsapp-inbound: an ordinary message from a patient
     Patient: [{ id: "pat-2", clinicId: "clinic-1", fullName: "New Patient", contactNumber: "+919888888899" }],
   });
   const twilioClient = createTwilioStub();
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null, twilioClient });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
 
   const reply = await withServer(app, async ({ request }) => {
     const response = await request("/webhooks/twilio/whatsapp-inbound", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-      body: formBody({ From: "whatsapp:+919888888899", To: "whatsapp:+19789069398", Body: "Hi there", MessageSid: "SM-general-2" }),
+      body: formBody({
+        From: "whatsapp:+919888888899",
+        To: "whatsapp:+19789069398",
+        Body: "Hi there",
+        MessageSid: "SM-general-2",
+      }),
     });
     return response.text();
   });
@@ -3272,12 +3640,70 @@ test("GET /r/:token redirects to the patient app, carrying doctorId through as a
   });
 });
 
+test("GET /rx/:token proxies the real file bytes and never exposes the underlying Supabase signed URL", async () => {
+  const { createRxToken } = require("../../src/lib/rx-token");
+  const supabaseClient = createSupabaseStub();
+  const fetchedUrls = [];
+  supabaseClient.storage = {
+    from: () => ({
+      async createSignedUrl(path) {
+        fetchedUrls.push(path);
+        return {
+          data: { signedUrl: `https://example.supabase.co/storage/v1/signed/${path}?token=SECRET` },
+          error: null,
+        };
+      },
+    }),
+  };
+  const originalFetch = global.fetch;
+  global.fetch = async (url, ...rest) => {
+    if (typeof url !== "string" || !url.startsWith("https://example.supabase.co/")) {
+      return originalFetch(url, ...rest);
+    }
+    assert.equal(url, `https://example.supabase.co/storage/v1/signed/clinic-1/visit-1/rx.pdf?token=SECRET`);
+    return {
+      ok: true,
+      headers: new Map([["content-type", "application/pdf"]]),
+      async arrayBuffer() {
+        return Buffer.from("fake pdf bytes");
+      },
+    };
+  };
+  try {
+    const app = createApp({ supabaseClient, nettuClient: null });
+    const token = createRxToken({ clinicId: "clinic-1", visitId: "visit-1", path: "clinic-1/visit-1/rx.pdf" });
+
+    await withServer(app, async ({ request }) => {
+      const response = await request(`/rx/${token}`, { redirect: "manual" });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-type"), "application/pdf");
+      assert.match(response.headers.get("content-disposition") ?? "", /inline/);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      assert.equal(bytes.toString(), "fake pdf bytes");
+
+      // The whole point of this route: no response header or body byte ever
+      // carries the real Supabase URL (or its access token).
+      const allHeaders = [...response.headers.entries()].map(([, v]) => v).join(" ");
+      assert.doesNotMatch(allHeaders, /supabase/i);
+      assert.doesNotMatch(allHeaders, /SECRET/);
+
+      const badToken = await request("/rx/not-a-real-token", { redirect: "manual" });
+      assert.equal(badToken.status, 404);
+    });
+    assert.deepEqual(fetchedUrls, ["clinic-1/visit-1/rx.pdf"]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("POST /webhooks/twilio/whatsapp-inbound rejects a BOOKING deep link when the phone doesn't match the appointment's patient", async () => {
   const supabaseClient = createTableStub({
     Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
     Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya" }],
     Patient: [{ id: "pat-1", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919888888888" }],
-    Appointment: [{ id: "apt_booking_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
+    Appointment: [
+      { id: "apt_booking_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" },
+    ],
   });
   const twilioClient = createTwilioStub();
   const app = createApp({
@@ -3294,7 +3720,12 @@ test("POST /webhooks/twilio/whatsapp-inbound rejects a BOOKING deep link when th
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
       // A different phone number than apt_booking_1's own patient — must not attach.
-      body: formBody({ From: "whatsapp:+919000000000", To: "whatsapp:+19789069398", Body: "BOOKING apt_booking_1", MessageSid: "SM-booking-2" }),
+      body: formBody({
+        From: "whatsapp:+919000000000",
+        To: "whatsapp:+19789069398",
+        Body: "BOOKING apt_booking_1",
+        MessageSid: "SM-booking-2",
+      }),
     });
     assert.equal(response.status, 200);
   });
@@ -3346,7 +3777,12 @@ test("POST /webhooks/twilio/whatsapp-inbound sends the structured fallback for a
     const response = await request("/webhooks/twilio/whatsapp-inbound", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "hi", MessageSid: "SM-basic-1" }),
+      body: formBody({
+        From: "whatsapp:+919888888888",
+        To: "whatsapp:+19789069398",
+        Body: "hi",
+        MessageSid: "SM-basic-1",
+      }),
     });
     assert.equal(response.status, 200);
     const outbound = supabaseClient._tables.ChatMsg.find((m) => m.direction === "outbound");
@@ -3375,7 +3811,12 @@ test("POST /webhooks/twilio/whatsapp-inbound invokes the full AI agent for a pre
     const response = await request("/webhooks/twilio/whatsapp-inbound", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-      body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "hi", MessageSid: "SM-premium-1" }),
+      body: formBody({
+        From: "whatsapp:+919888888888",
+        To: "whatsapp:+19789069398",
+        Body: "hi",
+        MessageSid: "SM-premium-1",
+      }),
     });
     assert.equal(response.status, 200);
     const outbound = supabaseClient._tables.ChatMsg.find((m) => m.direction === "outbound");
@@ -3389,7 +3830,14 @@ test("POST /webhooks/twilio/whatsapp-inbound: custom plan without the ai_whatsap
   await withServer(
     createApp({
       supabaseClient: createTableStub({
-        Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398", plan: { planId: "custom", addonIds: ["smart_ivr"] } }],
+        Clinic: [
+          {
+            id: "clinic-1",
+            name: "Nirmaya Clinic",
+            whatsappFrom: "+19789069398",
+            plan: { planId: "custom", addonIds: ["smart_ivr"] },
+          },
+        ],
       }),
       nettuClient: null,
       firebaseAdminApp: null,
@@ -3406,14 +3854,26 @@ test("POST /webhooks/twilio/whatsapp-inbound: custom plan without the ai_whatsap
       const response = await request("/webhooks/twilio/whatsapp-inbound", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-        body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "hi", MessageSid: "SM-custom-no-addon" }),
+        body: formBody({
+          From: "whatsapp:+919888888888",
+          To: "whatsapp:+19789069398",
+          Body: "hi",
+          MessageSid: "SM-custom-no-addon",
+        }),
       });
       assert.equal(response.status, 200);
     },
   );
 
   const supabaseClientWithAddon = createTableStub({
-    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398", plan: { planId: "custom", addonIds: ["ai_whatsapp_agent"] } }],
+    Clinic: [
+      {
+        id: "clinic-1",
+        name: "Nirmaya Clinic",
+        whatsappFrom: "+19789069398",
+        plan: { planId: "custom", addonIds: ["ai_whatsapp_agent"] },
+      },
+    ],
     Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true }],
   });
   await withServer(
@@ -3430,7 +3890,12 @@ test("POST /webhooks/twilio/whatsapp-inbound: custom plan without the ai_whatsap
       const response = await request("/webhooks/twilio/whatsapp-inbound", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "x-twilio-signature": "valid" },
-        body: formBody({ From: "whatsapp:+919888888888", To: "whatsapp:+19789069398", Body: "hi", MessageSid: "SM-custom-with-addon" }),
+        body: formBody({
+          From: "whatsapp:+919888888888",
+          To: "whatsapp:+19789069398",
+          Body: "hi",
+          MessageSid: "SM-custom-with-addon",
+        }),
       });
       assert.equal(response.status, 200);
       const outbound = supabaseClientWithAddon._tables.ChatMsg.find((m) => m.direction === "outbound");
@@ -3445,7 +3910,13 @@ test("PATCH /api/v1/clinic lets the owner set googleReviewUrl; a receptionist ge
   const supabaseClient = createTableStub({
     Staff: [
       { id: "staff-owner", firebaseUid: "staff-owner", clinicId: "clinic-1", role: "owner", isActive: true },
-      { id: "staff-reception", firebaseUid: "staff-reception", clinicId: "clinic-1", role: "receptionist", isActive: true },
+      {
+        id: "staff-reception",
+        firebaseUid: "staff-reception",
+        clinicId: "clinic-1",
+        role: "receptionist",
+        isActive: true,
+      },
     ],
     Clinic: [{ id: "clinic-1", status: "active", name: "Nirmaya Clinic" }],
   });
@@ -3453,7 +3924,9 @@ test("PATCH /api/v1/clinic lets the owner set googleReviewUrl; a receptionist ge
   const ownerApp = createApp({
     supabaseClient,
     nettuClient: null,
-    firebaseAdminApp: createFirebaseAdminStub({ decodedToken: { uid: "staff-owner", role: "owner", clinicId: "clinic-1", doctorId: null } }),
+    firebaseAdminApp: createFirebaseAdminStub({
+      decodedToken: { uid: "staff-owner", role: "owner", clinicId: "clinic-1", doctorId: null },
+    }),
     stripeClient: null,
     openaiClient: null,
   });
@@ -3472,7 +3945,9 @@ test("PATCH /api/v1/clinic lets the owner set googleReviewUrl; a receptionist ge
   const receptionApp = createApp({
     supabaseClient,
     nettuClient: null,
-    firebaseAdminApp: createFirebaseAdminStub({ decodedToken: { uid: "staff-reception", role: "receptionist", clinicId: "clinic-1", doctorId: null } }),
+    firebaseAdminApp: createFirebaseAdminStub({
+      decodedToken: { uid: "staff-reception", role: "receptionist", clinicId: "clinic-1", doctorId: null },
+    }),
     stripeClient: null,
     openaiClient: null,
   });
@@ -3554,7 +4029,12 @@ test("POST /api/v1/billing/subscription/checkout-session fails gracefully when t
     const response = await request("/api/v1/billing/subscription/checkout-session", {
       method: "POST",
       headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
-      body: JSON.stringify({ planId: "custom", addonIds: [], successUrl: "https://app/ok", cancelUrl: "https://app/cancel" }),
+      body: JSON.stringify({
+        planId: "custom",
+        addonIds: [],
+        successUrl: "https://app/ok",
+        cancelUrl: "https://app/cancel",
+      }),
     });
     const body = await readJson(response);
     assert.equal(response.status, 503);
@@ -3735,7 +4215,9 @@ test("POST /webhooks/stripe customer.subscription.created syncs status, period e
             status: "active",
             current_period_end: 1_800_000_000,
             metadata: { clinicId: "clinic-1", planId: "premium", addonIds: "[]" },
-            items: { data: [{ id: "si_base_1", price: { id: "price_premium_test" }, current_period_end: 1_800_000_000 }] },
+            items: {
+              data: [{ id: "si_base_1", price: { id: "price_premium_test" }, current_period_end: 1_800_000_000 }],
+            },
           },
         },
       },
@@ -3760,7 +4242,15 @@ test("POST /webhooks/stripe customer.subscription.created syncs status, period e
 
 test("POST /webhooks/stripe customer.subscription.deleted marks the clinic canceled", async () => {
   const supabaseClient = createTableStub({
-    Clinic: [{ id: "clinic-1", stripeCustomerId: "cus_1", stripeSubscriptionId: "sub_1", subscriptionStatus: "active", subscriptionItems: { base: { itemId: "si_1" }, addons: {} } }],
+    Clinic: [
+      {
+        id: "clinic-1",
+        stripeCustomerId: "cus_1",
+        stripeSubscriptionId: "sub_1",
+        subscriptionStatus: "active",
+        subscriptionItems: { base: { itemId: "si_1" }, addons: {} },
+      },
+    ],
   });
   const app = createApp({
     supabaseClient,
@@ -3768,7 +4258,9 @@ test("POST /webhooks/stripe customer.subscription.deleted marks the clinic cance
     stripeClient: createStripeStub({
       event: {
         type: "customer.subscription.deleted",
-        data: { object: { id: "sub_1", customer: "cus_1", status: "canceled", current_period_end: null, items: { data: [] } } },
+        data: {
+          object: { id: "sub_1", customer: "cus_1", status: "canceled", current_period_end: null, items: { data: [] } },
+        },
       },
     }),
   });
@@ -4000,10 +4492,28 @@ test("POST /api/v1/public/appointments books a real appointment, creating the Pa
 test("GET /api/v1/public/appointments/:id/comms-links returns reviewUrl and a wa.me textCommsUrl", async () => {
   const futureStart = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
   const supabaseClient = createTableStub({
-    Clinic: [publicClinicRow({ whatsappFrom: "+14155238886", googleReviewUrl: "https://g.page/r/nirmaya-clinic/review" })],
-    Appointment: [{ id: "apt_public_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", timeslot: futureStart, status: "booked", auditHistory: [] }],
+    Clinic: [
+      publicClinicRow({ whatsappFrom: "+14155238886", googleReviewUrl: "https://g.page/r/nirmaya-clinic/review" }),
+    ],
+    Appointment: [
+      {
+        id: "apt_public_1",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        patientId: "pat-1",
+        timeslot: futureStart,
+        status: "booked",
+        auditHistory: [],
+      },
+    ],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const missing = await request("/api/v1/public/appointments/apt_public_1/comms-links");
@@ -4021,9 +4531,25 @@ test("GET /api/v1/public/appointments/:id/comms-links returns nulls gracefully w
   const futureStart = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
   const supabaseClient = createTableStub({
     Clinic: [publicClinicRow({ whatsappFrom: null, googleReviewUrl: null })],
-    Appointment: [{ id: "apt_public_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", timeslot: futureStart, status: "booked", auditHistory: [] }],
+    Appointment: [
+      {
+        id: "apt_public_1",
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        patientId: "pat-1",
+        timeslot: futureStart,
+        status: "booked",
+        auditHistory: [],
+      },
+    ],
   });
-  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp: null, stripeClient: null, openaiClient: null });
+  const app = createApp({
+    supabaseClient,
+    nettuClient: null,
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+  });
 
   await withServer(app, async ({ request }) => {
     const response = await request("/api/v1/public/appointments/apt_public_1/comms-links?clinicId=clinic-1");

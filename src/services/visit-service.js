@@ -4,6 +4,8 @@
 const { makeId } = require("../lib/ids");
 const messagingSvc = require("./messaging-service");
 const tableSvc = require("./table-service");
+const { createRxToken } = require("../lib/rx-token");
+const { config } = require("../config");
 
 function dbErr(msg) {
   return Object.assign(new Error(`DB error ${msg}`), { code: "DATABASE_ERROR", statusCode: 500 });
@@ -277,17 +279,31 @@ async function sendAttachment(supabaseClient, twilioClient, { clinicId, visitId,
     throw Object.assign(new Error("This patient has no phone number on file"), { code: "MISSING_PHONE", statusCode: 422 });
   }
 
-  const url = await createReadUrl(supabaseClient, path);
+  // Never hand the caller a real Supabase Storage URL — mint a token for
+  // our own /rx/:token proxy instead (see app.js + lib/rx-token.js), so the
+  // only URL that ever appears in the message, in Twilio's fetch, or in any
+  // log is api.schedurx.com. Twilio fetches this URL itself and re-hosts the
+  // bytes as a native inline document/image preview (mediaUrl), not a
+  // tappable link — fails closed if PUBLIC_API_BASE_URL isn't configured on
+  // this deployment, rather than falling back to leaking the Supabase URL.
+  if (!config.PUBLIC_API_BASE_URL) {
+    throw Object.assign(new Error("PUBLIC_API_BASE_URL is not configured for this deployment"), {
+      code: "MESSAGING_NOT_CONFIGURED",
+      statusCode: 503,
+    });
+  }
+  const token = createRxToken({ clinicId, visitId, path });
+  const mediaUrl = [`${config.PUBLIC_API_BASE_URL}/rx/${token}`];
   const firstName = (patient.fullName ?? "there").split(" ")[0];
   const label = attachment.type === "digital" ? "prescription" : "prescription photo";
-  const body = `Hi ${firstName}, here's your ${label}: ${url}`;
+  const body = `Hi ${firstName}, here's your ${label}.`;
 
   const thread = await messagingSvc.findOrCreateThread(supabaseClient, {
     clinicId,
     patientId: patient.id,
     contactPhone: patient.contactNumber,
   });
-  await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body, staffContext }, log, twilioClient);
+  await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body, mediaUrl, staffContext }, log, twilioClient);
 
   return markAttachmentSent(supabaseClient, clinicId, visitId, path);
 }

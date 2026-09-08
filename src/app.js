@@ -16,6 +16,8 @@ const { createStripeWebhookRouter } = require("./routes/stripe-webhook");
 const { createNettuWebhookRouter } = require("./routes/webhooks-nettu");
 const { createTwilioWebhookRouter } = require("./routes/webhooks-twilio");
 const { verifyRebookToken } = require("./lib/rebook-token");
+const { verifyRxToken } = require("./lib/rx-token");
+const visitSvc = require("./services/visit-service");
 const { mountDocs } = require("./docs");
 
 function createApp({
@@ -129,6 +131,42 @@ function createApp({
       302,
       `${config.PATIENT_APP_BASE_URL}/${claims.clinicId}/${encodeURIComponent(claims.phone)}${doctorQuery}`,
     );
+  });
+
+  // Short-lived, signed prescription-file link — see lib/rx-token.js. Used
+  // to send a real prescription PDF/photo over WhatsApp as native media
+  // (an inline document/image preview) instead of a tappable link — see
+  // visit-service.js's sendAttachment. Deliberately PROXIES the actual
+  // bytes rather than redirecting to Supabase Storage's own signed URL: a
+  // redirect would still put that URL in a Location header Twilio's
+  // fetcher (and briefly the patient's client) would see, and the whole
+  // point of this route is that api.schedurx.com is the only URL ever
+  // visible anywhere in the message. No auth beyond the token itself, same
+  // as /r/:token — a WhatsApp/Twilio fetch has no session to authenticate.
+  app.get("/rx/:token", async (request, response) => {
+    const claims = verifyRxToken(request.params.token);
+    if (!claims) {
+      return response.status(404).send("This link has expired.");
+    }
+    try {
+      const signedUrl = await visitSvc.createReadUrl(supabaseClient, claims.path);
+      const upstream = await fetch(signedUrl);
+      if (!upstream.ok) {
+        logger.warn({ status: upstream.status, path: claims.path }, "[app] /rx/:token upstream fetch failed");
+        return response.status(404).send("This file is no longer available.");
+      }
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
+      const filename = claims.path.split("/").pop() || "prescription";
+      response.set("Content-Type", contentType);
+      // inline (not attachment): what makes a WhatsApp/browser client
+      // render a real preview instead of forcing a download.
+      response.set("Content-Disposition", `inline; filename="${filename}"`);
+      return response.send(buffer);
+    } catch (err) {
+      logger.error({ err, path: claims.path }, "[app] /rx/:token proxy failed");
+      return response.status(502).send("Couldn't load this file right now.");
+    }
   });
 
   // Unconditional — no client/env var gates the API docs themselves.

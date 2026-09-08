@@ -71,6 +71,25 @@ describe("sendSms", () => {
     assert.equal(sdkClient.calls[0].body, undefined);
   });
 
+  test("mediaUrl is passed through as-is, alongside body (not replacing it)", async () => {
+    const sdkClient = fakeSdkClient();
+    const twilioClient = createTwilioClient({ accountSid: "ACtest", authToken: "tok", smsFrom: "+15550000000", sdkClient });
+
+    await twilioClient.sendSms({ to: "+919888888888", body: "hi", mediaUrl: ["https://api.schedurx.example/rx/abc123"] });
+
+    assert.deepEqual(sdkClient.calls[0].mediaUrl, ["https://api.schedurx.example/rx/abc123"]);
+    assert.equal(sdkClient.calls[0].body, "hi");
+  });
+
+  test("omits mediaUrl entirely when none is given (not an empty array)", async () => {
+    const sdkClient = fakeSdkClient();
+    const twilioClient = createTwilioClient({ accountSid: "ACtest", authToken: "tok", smsFrom: "+15550000000", sdkClient });
+
+    await twilioClient.sendSms({ to: "+919888888888", body: "hi" });
+
+    assert.equal("mediaUrl" in sdkClient.calls[0], false);
+  });
+
   test("attaches statusCallback pointing at the real /webhooks/twilio/message-status route when configured", async () => {
     const sdkClient = fakeSdkClient();
     const twilioClient = createTwilioClient({
@@ -142,6 +161,15 @@ describe("sendWhatsApp", () => {
     await new Promise((r) => setImmediate(r));
     assert.equal(logged[0].toPhone, "+919888888888", "onMessageSent must get the plain number, not the whatsapp:-prefixed wire form");
     assert.equal(logged[0].channel, "whatsapp");
+  });
+
+  test("mediaUrl is passed through for a real inline document/image preview", async () => {
+    const sdkClient = fakeSdkClient();
+    const twilioClient = createTwilioClient({ accountSid: "ACtest", authToken: "tok", whatsappFrom: "+14155238886", sdkClient });
+
+    await twilioClient.sendWhatsApp({ to: "+919888888888", body: "Here's your prescription", mediaUrl: ["https://api.schedurx.example/rx/abc123"] });
+
+    assert.deepEqual(sdkClient.calls[0].mediaUrl, ["https://api.schedurx.example/rx/abc123"]);
   });
 
   test("attaches the same real statusCallback route as sendSms", async () => {

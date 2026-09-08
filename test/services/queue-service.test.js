@@ -1,6 +1,11 @@
 const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 
+// visit-service.js's sendAttachment (invoked via the 'complete' auto-send
+// path below) mints an /rx/:token link off this — must be set before
+// config.js is first required, same requirement as every other var it reads.
+process.env.PUBLIC_API_BASE_URL ||= "https://api.schedurx.example";
+
 const { listQueue, addWalkIn, advance, listPossibleNoShows } = require("../../src/services/queue-service");
 const { createTableStub } = require("../helpers/supabase-table-stub");
 const { createTwilioStub } = require("../helpers/twilio-stub");
@@ -21,7 +26,9 @@ describe("addWalkIn", () => {
 
   test("checking in a booked appointment derives doctorId/patientId from the appointment, ignoring the client's, and tags walkIn:false", async () => {
     const supabaseClient = createTableStub({
-      Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-real", patientId: "pat-real", status: "booked" }],
+      Appointment: [
+        { id: "apt_1", clinicId: "clinic-1", doctorId: "doc-real", patientId: "pat-real", status: "booked" },
+      ],
     });
     const item = await addWalkIn(supabaseClient, {
       clinicId: "clinic-1",
@@ -39,7 +46,10 @@ describe("addWalkIn", () => {
     const supabaseClient = createTableStub({ Appointment: [] });
     await assert.rejects(
       () => addWalkIn(supabaseClient, { clinicId: "clinic-1", appointmentId: "nope" }),
-      (err) => { assert.equal(err.code, "APPOINTMENT_NOT_FOUND"); return true; },
+      (err) => {
+        assert.equal(err.code, "APPOINTMENT_NOT_FOUND");
+        return true;
+      },
     );
   });
 
@@ -49,7 +59,10 @@ describe("addWalkIn", () => {
     });
     await assert.rejects(
       () => addWalkIn(supabaseClient, { clinicId: "clinic-1", appointmentId: "apt_1" }),
-      (err) => { assert.equal(err.code, "APPOINTMENT_NOT_FOUND"); return true; },
+      (err) => {
+        assert.equal(err.code, "APPOINTMENT_NOT_FOUND");
+        return true;
+      },
     );
   });
 
@@ -59,18 +72,26 @@ describe("addWalkIn", () => {
     });
     await assert.rejects(
       () => addWalkIn(supabaseClient, { clinicId: "clinic-1", appointmentId: "apt_1" }),
-      (err) => { assert.equal(err.code, "APPOINTMENT_NOT_BOOKED"); return true; },
+      (err) => {
+        assert.equal(err.code, "APPOINTMENT_NOT_BOOKED");
+        return true;
+      },
     );
   });
 
   test("throws ALREADY_CHECKED_IN when a non-done queue entry already exists for this appointment", async () => {
     const supabaseClient = createTableStub({
       Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
-      QueueItem: [{ id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: "apt_1", status: "waiting", position: 1 }],
+      QueueItem: [
+        { id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: "apt_1", status: "waiting", position: 1 },
+      ],
     });
     await assert.rejects(
       () => addWalkIn(supabaseClient, { clinicId: "clinic-1", appointmentId: "apt_1" }),
-      (err) => { assert.equal(err.code, "ALREADY_CHECKED_IN"); return true; },
+      (err) => {
+        assert.equal(err.code, "ALREADY_CHECKED_IN");
+        return true;
+      },
     );
   });
 
@@ -78,7 +99,9 @@ describe("addWalkIn", () => {
     // e.g. a same-day rebooking after an earlier visit — shouldn't look "already checked in" forever.
     const supabaseClient = createTableStub({
       Appointment: [{ id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", status: "booked" }],
-      QueueItem: [{ id: "q_old", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: "apt_1", status: "done", position: 1 }],
+      QueueItem: [
+        { id: "q_old", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: "apt_1", status: "done", position: 1 },
+      ],
     });
     const item = await addWalkIn(supabaseClient, { clinicId: "clinic-1", appointmentId: "apt_1" });
     assert.equal(item.status, "waiting");
@@ -104,9 +127,15 @@ describe("advance — syncing the linked appointment", () => {
 
   test("'next' still works for a queue entry with no linked appointment (a real walk-in)", async () => {
     const supabaseClient = createTableStub({
-      QueueItem: [{ id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: null, status: "in_room", position: 1 }],
+      QueueItem: [
+        { id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: null, status: "in_room", position: 1 },
+      ],
     });
-    const { nowServing } = await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "next" });
+    const { nowServing } = await advance(supabaseClient, {
+      clinicId: "clinic-1",
+      doctorId: "doc-1",
+      direction: "next",
+    });
     assert.equal(nowServing, null);
     assert.equal(supabaseClient._tables.QueueItem[0].status, "done");
   });
@@ -119,7 +148,11 @@ describe("advance — syncing the linked appointment", () => {
   // comment on this branch for the full "why").
   test("'complete' marks the linked appointment completed but leaves the QueueItem status untouched (still in_room)", async () => {
     const supabaseClient = seed();
-    const { nowServing } = await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" });
+    const { nowServing } = await advance(supabaseClient, {
+      clinicId: "clinic-1",
+      doctorId: "doc-1",
+      direction: "complete",
+    });
     assert.equal(supabaseClient._tables.Appointment[0].status, "completed");
     assert.equal(supabaseClient._tables.QueueItem[0].status, "in_room");
     assert.equal(nowServing.id, "q_1");
@@ -128,9 +161,15 @@ describe("advance — syncing the linked appointment", () => {
 
   test("'complete' still works for a queue entry with no linked appointment (a real walk-in) without touching QueueItem status", async () => {
     const supabaseClient = createTableStub({
-      QueueItem: [{ id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: null, status: "in_room", position: 1 }],
+      QueueItem: [
+        { id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: null, status: "in_room", position: 1 },
+      ],
     });
-    const { nowServing } = await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" });
+    const { nowServing } = await advance(supabaseClient, {
+      clinicId: "clinic-1",
+      doctorId: "doc-1",
+      direction: "complete",
+    });
     assert.equal(nowServing.id, "q_1");
     assert.equal(supabaseClient._tables.QueueItem[0].status, "in_room");
   });
@@ -139,7 +178,10 @@ describe("advance — syncing the linked appointment", () => {
     const supabaseClient = createTableStub({ QueueItem: [] });
     await assert.rejects(
       () => advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" }),
-      (err) => { assert.equal(err.code, "NO_CURRENT_PATIENT"); return true; },
+      (err) => {
+        assert.equal(err.code, "NO_CURRENT_PATIENT");
+        return true;
+      },
     );
   });
 
@@ -162,20 +204,32 @@ describe("advance — syncing the linked appointment", () => {
       Appointment: [{ id: "apt_1", clinicId: "clinic-1", status: "booked", auditHistory: [] }],
       Visit: [
         {
-          id: "visit_1", clinicId: "clinic-1", patientId: "pat-1",
+          id: "visit_1",
+          clinicId: "clinic-1",
+          patientId: "pat-1",
           visitDate: new Date().toISOString().slice(0, 10),
           rxAttachments: [{ path: "clinic-1/visit_1/rx.jpg", type: "photo", uploadedAt: new Date().toISOString() }],
         },
       ],
       QueueItem: [
         {
-          id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", appointmentId: "apt_1",
-          status: "in_room", position: 1,
+          id: "q_1",
+          clinicId: "clinic-1",
+          doctorId: "doc-1",
+          patientId: "pat-1",
+          appointmentId: "apt_1",
+          status: "in_room",
+          position: 1,
         },
       ],
     });
     const twilioClient = createTwilioStub();
-    await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" }, null, twilioClient);
+    await advance(
+      supabaseClient,
+      { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" },
+      null,
+      twilioClient,
+    );
 
     const sent = twilioClient.calls.sendWhatsApp.find((c) => c.to === "+919888888888");
     assert.ok(sent, "expected the unsent photo Rx to be auto-sent on checkout");
@@ -190,20 +244,39 @@ describe("advance — syncing the linked appointment", () => {
       Appointment: [{ id: "apt_1", clinicId: "clinic-1", status: "booked", auditHistory: [] }],
       Visit: [
         {
-          id: "visit_1", clinicId: "clinic-1", patientId: "pat-1",
+          id: "visit_1",
+          clinicId: "clinic-1",
+          patientId: "pat-1",
           visitDate: new Date().toISOString().slice(0, 10),
-          rxAttachments: [{ path: "clinic-1/visit_1/rx.jpg", type: "photo", uploadedAt: new Date().toISOString(), sentAt: new Date().toISOString() }],
+          rxAttachments: [
+            {
+              path: "clinic-1/visit_1/rx.jpg",
+              type: "photo",
+              uploadedAt: new Date().toISOString(),
+              sentAt: new Date().toISOString(),
+            },
+          ],
         },
       ],
       QueueItem: [
         {
-          id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", appointmentId: "apt_1",
-          status: "in_room", position: 1,
+          id: "q_1",
+          clinicId: "clinic-1",
+          doctorId: "doc-1",
+          patientId: "pat-1",
+          appointmentId: "apt_1",
+          status: "in_room",
+          position: 1,
         },
       ],
     });
     const twilioClient = createTwilioStub();
-    await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" }, null, twilioClient);
+    await advance(
+      supabaseClient,
+      { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" },
+      null,
+      twilioClient,
+    );
     assert.equal(twilioClient.calls.sendWhatsApp.length, 0);
   });
 
@@ -214,20 +287,32 @@ describe("advance — syncing the linked appointment", () => {
       Appointment: [{ id: "apt_1", clinicId: "clinic-1", status: "booked", auditHistory: [] }],
       Visit: [
         {
-          id: "visit_1", clinicId: "clinic-1", patientId: "pat-1",
+          id: "visit_1",
+          clinicId: "clinic-1",
+          patientId: "pat-1",
           visitDate: new Date().toISOString().slice(0, 10),
           rxAttachments: [{ path: "clinic-1/visit_1/rx.jpg", type: "photo", uploadedAt: new Date().toISOString() }],
         },
       ],
       QueueItem: [
         {
-          id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1", appointmentId: "apt_1",
-          status: "in_room", position: 1,
+          id: "q_1",
+          clinicId: "clinic-1",
+          doctorId: "doc-1",
+          patientId: "pat-1",
+          appointmentId: "apt_1",
+          status: "in_room",
+          position: 1,
         },
       ],
     });
     const twilioClient = createTwilioStub({ shouldFailWhatsApp: true });
-    const { nowServing } = await advance(supabaseClient, { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" }, null, twilioClient);
+    const { nowServing } = await advance(
+      supabaseClient,
+      { clinicId: "clinic-1", doctorId: "doc-1", direction: "complete" },
+      null,
+      twilioClient,
+    );
     assert.equal(nowServing.id, "q_1");
     assert.equal(supabaseClient._tables.Appointment.find((a) => a.id === "apt_1").status, "completed");
   });
@@ -237,8 +322,13 @@ describe("advance — syncing the linked appointment", () => {
       Appointment: [{ id: "apt_1", clinicId: "clinic-1", status: "completed", auditHistory: [] }],
       QueueItem: [
         {
-          id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: "apt_1",
-          status: "done", position: 1, completedAt: new Date().toISOString(),
+          id: "q_1",
+          clinicId: "clinic-1",
+          doctorId: "doc-1",
+          appointmentId: "apt_1",
+          status: "done",
+          position: 1,
+          completedAt: new Date().toISOString(),
         },
       ],
     });
@@ -253,8 +343,12 @@ describe("listPossibleNoShows", () => {
 
   function apptRow(overrides = {}) {
     return {
-      id: "apt_1", clinicId: "clinic-1", doctorId: "doc-1", patientId: "pat-1",
-      status: "booked", timeslot: new Date(Date.now() - HOUR_MS).toISOString(), // 1h ago
+      id: "apt_1",
+      clinicId: "clinic-1",
+      doctorId: "doc-1",
+      patientId: "pat-1",
+      status: "booked",
+      timeslot: new Date(Date.now() - HOUR_MS).toISOString(), // 1h ago
       ...overrides,
     };
   }
@@ -287,7 +381,9 @@ describe("listPossibleNoShows", () => {
   test("excludes an appointment that already has a queue entry (checked in, even if still waiting/in_room)", async () => {
     const supabaseClient = createTableStub({
       Appointment: [apptRow()],
-      QueueItem: [{ id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: "apt_1", status: "waiting", position: 1 }],
+      QueueItem: [
+        { id: "q_1", clinicId: "clinic-1", doctorId: "doc-1", appointmentId: "apt_1", status: "waiting", position: 1 },
+      ],
     });
     const result = await listPossibleNoShows(supabaseClient, "clinic-1", { graceMinutes: 20 });
     assert.equal(result.length, 0);
@@ -308,7 +404,10 @@ describe("listPossibleNoShows", () => {
       QueueItem: [],
     });
     const result = await listPossibleNoShows(supabaseClient, "clinic-1", { doctorId: "doc-a", graceMinutes: 20 });
-    assert.deepEqual(result.map((r) => r.id), ["apt_a"]);
+    assert.deepEqual(
+      result.map((r) => r.id),
+      ["apt_a"],
+    );
   });
 
   test("uses the default grace period when none is given", async () => {

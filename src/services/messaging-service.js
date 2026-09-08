@@ -65,7 +65,12 @@ async function listMessages(supabaseClient, threadId) {
   return data ?? [];
 }
 
-async function sendReply(supabaseClient, { clinicId, threadId, staffId, body, staffContext }, log, twilioClient) {
+// mediaUrl (optional array of URLs) attaches real media — a native inline
+// WhatsApp document/image preview instead of a tappable link, see
+// twilio-client.js. SMS-channel threads ignore it silently (Twilio SMS MMS
+// support varies by number/region and no caller of this needs it there
+// today) — the message still sends as plain text either way.
+async function sendReply(supabaseClient, { clinicId, threadId, staffId, body, mediaUrl, staffContext }, log, twilioClient) {
   const thread = await getThread(supabaseClient, clinicId, threadId, staffContext);
 
   let result;
@@ -78,7 +83,7 @@ async function sendReply(supabaseClient, { clinicId, threadId, staffId, body, st
     const sent =
       thread.channel === "sms"
         ? await twilioClient.sendSms({ to: thread.contactPhone, body })
-        : await twilioClient.sendWhatsApp({ to: thread.contactPhone, from: clinic?.whatsappFrom, body });
+        : await twilioClient.sendWhatsApp({ to: thread.contactPhone, from: clinic?.whatsappFrom, body, mediaUrl });
     result = { ok: true, stubbed: false, waMessageId: sent?.sid ?? null };
   } else {
     result = await whatsapp.sendWhatsAppMessage({ toPhone: thread.contactPhone, body }, log);
