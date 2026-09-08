@@ -4,6 +4,7 @@
 const { makeId } = require("../lib/ids");
 const messagingSvc = require("./messaging-service");
 const tableSvc = require("./table-service");
+const clinicSvc = require("./clinic-service");
 const { createRxToken } = require("../lib/rx-token");
 const { config } = require("../config");
 
@@ -303,6 +304,41 @@ async function sendAttachment(supabaseClient, twilioClient, { clinicId, visitId,
     patientId: patient.id,
     contactPhone: patient.contactNumber,
   });
+
+  // Prefers the Meta-approved "prescription_ready_v1" Content Template
+  // (TWILIO_PRESCRIPTION_CONTENT_SID) when configured, since — like
+  // sendDoctorUnavailableRebookNotice's template preference — it works
+  // regardless of whether a 24h WhatsApp session happens to be open, unlike
+  // the free-form mediaUrl send below. Only for 'digital' (PDF) attachments:
+  // the approved template's media header is locked to the file type of its
+  // submission sample, which was a PDF — sending a photo through it would
+  // likely be rejected, so photos always use the free-form path only.
+  // Falls back to free-form on any failure (unconfigured, still pending
+  // Meta approval, transient Twilio error) exactly like that same precedent.
+  if (attachment.type === "digital" && config.TWILIO_PRESCRIPTION_CONTENT_SID) {
+    try {
+      const clinic = await clinicSvc.getClinic(supabaseClient, clinicId);
+      const ext = path.split(".").pop() || "pdf";
+      await messagingSvc.sendReply(
+        supabaseClient,
+        {
+          clinicId,
+          threadId: thread.id,
+          staffId,
+          body,
+          contentSid: config.TWILIO_PRESCRIPTION_CONTENT_SID,
+          contentVariables: { 1: firstName, 2: label, 3: clinic?.name ?? "your clinic", 4: `${token}.${ext}` },
+          staffContext,
+        },
+        log,
+        twilioClient,
+      );
+      return markAttachmentSent(supabaseClient, clinicId, visitId, path);
+    } catch (err) {
+      log?.warn({ err, visitId, path }, "[visitSvc] prescription template send failed, falling back to free-form");
+    }
+  }
+
   await messagingSvc.sendReply(supabaseClient, { clinicId, threadId: thread.id, staffId, body, mediaUrl, staffContext }, log, twilioClient);
 
   return markAttachmentSent(supabaseClient, clinicId, visitId, path);

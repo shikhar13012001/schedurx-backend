@@ -2438,6 +2438,120 @@ test("POST /api/v1/visits/:id/attachments/send messages the patient a link and m
   assert.equal(threadRows.length, 1, "expected exactly one thread to be created/reused");
 });
 
+test("POST /api/v1/visits/:id/attachments/send prefers the prescription Content Template for a PDF attachment when configured", async () => {
+  const { config } = require("../../src/config");
+  const previousContentSid = config.TWILIO_PRESCRIPTION_CONTENT_SID;
+  config.TWILIO_PRESCRIPTION_CONTENT_SID = "HXcdb72f4eaee875a0f5e990a64e70f7a1";
+
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Patient: [{ id: "pat_1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+    Visit: [
+      {
+        id: "visit_1",
+        clinicId: "clinic-1",
+        patientId: "pat_1",
+        rxAttachments: [{ path: "clinic-1/visit_1/prescription-visit_1.pdf", type: "digital", uploadedAt: new Date().toISOString() }],
+      },
+    ],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+
+  try {
+    await withServer(app, async ({ request }) => {
+      const response = await request("/api/v1/visits/visit_1/attachments/send", {
+        method: "POST",
+        headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "clinic-1/visit_1/prescription-visit_1.pdf" }),
+      });
+      const body = await readJson(response);
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.ok(body.data.visit.rxAttachments[0].sentAt);
+    });
+
+    assert.equal(twilioClient.calls.sendWhatsApp.length, 1);
+    const sent = twilioClient.calls.sendWhatsApp[0];
+    assert.equal(sent.contentSid, "HXcdb72f4eaee875a0f5e990a64e70f7a1");
+    assert.equal(sent.contentVariables[1], "Rahul");
+    assert.equal(sent.contentVariables[2], "prescription");
+    assert.equal(sent.contentVariables[3], "Nirmaya Clinic");
+    // The Media URL is registered as ".../rx/{{4}}" — the real token plus
+    // its file extension must travel entirely inside this one variable,
+    // never as a separate mediaUrl param (Twilio's Content API has no such
+    // param for a contentSid send; the template's own registered URL
+    // pattern is what assembles the real link server-side).
+    assert.match(sent.contentVariables[4], /\.pdf$/);
+    assert.equal("mediaUrl" in sent, false);
+    assert.equal("body" in sent, false);
+  } finally {
+    config.TWILIO_PRESCRIPTION_CONTENT_SID = previousContentSid;
+  }
+});
+
+test("POST /api/v1/visits/:id/attachments/send falls back to the free-form send when the prescription template send fails (e.g. still pending Meta approval)", async () => {
+  const { config } = require("../../src/config");
+  const previousContentSid = config.TWILIO_PRESCRIPTION_CONTENT_SID;
+  config.TWILIO_PRESCRIPTION_CONTENT_SID = "HXcdb72f4eaee875a0f5e990a64e70f7a1";
+
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Clinic: [{ id: "clinic-1", name: "Nirmaya Clinic", whatsappFrom: "+19789069398" }],
+    Patient: [{ id: "pat_1", clinicId: "clinic-1", fullName: "Rahul Sharma", contactNumber: "+919888888888" }],
+    Visit: [
+      {
+        id: "visit_1",
+        clinicId: "clinic-1",
+        patientId: "pat_1",
+        rxAttachments: [{ path: "clinic-1/visit_1/prescription-visit_1.pdf", type: "digital", uploadedAt: new Date().toISOString() }],
+      },
+    ],
+  });
+  // A template pending Meta approval makes Twilio reject the send — the
+  // stub can't distinguish "this call used contentSid" from "this call used
+  // mediaUrl" (both go through the same sendWhatsApp), so it fails the
+  // first attempt only and succeeds after that, mirroring the real
+  // sequence: template attempt fails, free-form retry succeeds.
+  let calls = 0;
+  const twilioClient = createTwilioStub();
+  const realSendWhatsApp = twilioClient.sendWhatsApp.bind(twilioClient);
+  twilioClient.sendWhatsApp = async (opts) => {
+    calls += 1;
+    if (calls === 1) {
+      twilioClient.calls.sendWhatsApp.push(opts);
+      throw new Error("63007 Channel not configured for this content type (template pending approval)");
+    }
+    return realSendWhatsApp(opts);
+  };
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null, twilioClient });
+
+  try {
+    await withServer(app, async ({ request }) => {
+      const response = await request("/api/v1/visits/visit_1/attachments/send", {
+        method: "POST",
+        headers: { Authorization: "Bearer anything", "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "clinic-1/visit_1/prescription-visit_1.pdf" }),
+      });
+      const body = await readJson(response);
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.ok(body.data.visit.rxAttachments[0].sentAt, "expected the fallback send to still mark the attachment sent");
+    });
+
+    assert.equal(twilioClient.calls.sendWhatsApp.length, 2, "expected a failed template attempt followed by a successful free-form retry");
+    assert.ok(twilioClient.calls.sendWhatsApp[0].contentSid, "first attempt should have been the template");
+    assert.ok(twilioClient.calls.sendWhatsApp[1].mediaUrl, "second attempt should have been the free-form fallback");
+  } finally {
+    config.TWILIO_PRESCRIPTION_CONTENT_SID = previousContentSid;
+  }
+});
+
 test("POST /api/v1/visits/:id/attachments/send 404s for a path that isn't a real attachment on this visit", async () => {
   const firebaseAdminApp = createFirebaseAdminStub({
     decodedToken: { uid: "staff-1", role: "doctor", clinicId: "clinic-1" },

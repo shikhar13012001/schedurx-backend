@@ -31,6 +31,18 @@ const schema = z.object({
 
   CLINIC_ID: z.string().optional(),
 
+  // Testing switch for the Android missed-call safety net specifically —
+  // does NOT affect the existing Twilio carrier-forwarding missed-call path
+  // (comms-workflow-service.js's sendMissedCallFollowup call from
+  // webhooks-twilio.js is unconditional). Off by default: while the on-device
+  // detection pipeline is being validated, missed calls still get logged
+  // (CallLog row + Patient auto-create) but no WhatsApp follow-up fires, so
+  // testing never risks messaging a real patient. Flip to "true" once ready.
+  DEVICE_MISSED_CALL_SEND_FOLLOWUP: z
+    .string()
+    .optional()
+    .transform((value) => value === "true"),
+
   // ── Firebase Admin (staff auth + RBAC) — /api/v1 stays unmounted unless project id,
   // client email, and one of the two private-key forms below are all set.
   FIREBASE_PROJECT_ID: z.string().optional(),
@@ -122,6 +134,23 @@ const schema = z.object({
   // unconditionally); set this once the template's approved to prefer
   // WhatsApp instead, with SMS as the automatic fallback.
   TWILIO_DOCTOR_UNAVAILABLE_CONTENT_SID: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z
+      .string()
+      .regex(/^HX[a-fA-F0-9]{32}$/)
+      .optional(),
+  ),
+  // Optional Meta-approved Content Template ("prescription_ready_v1") for
+  // sending a prescription/photo attachment as a native WhatsApp document
+  // preview outside an open 24h session — see visit-service.js's
+  // sendAttachment. Its Media URL is registered as "https://.../rx/{{4}}"
+  // (see lib/rx-token.js), so contentVariables key "4" must always carry
+  // the real per-attachment token with its file extension appended (e.g.
+  // "<token>.pdf") — Twilio's own template-submission validator checks the
+  // variable value's extension, not the surrounding static URL text.
+  // Without it, sendAttachment only sends free-form (works only when a
+  // session happens to be open) exactly as it did before this var existed.
+  TWILIO_PRESCRIPTION_CONTENT_SID: z.preprocess(
     (value) => (value === "" ? undefined : value),
     z
       .string()

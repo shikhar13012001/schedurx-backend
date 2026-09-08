@@ -67,10 +67,20 @@ async function listMessages(supabaseClient, threadId) {
 
 // mediaUrl (optional array of URLs) attaches real media — a native inline
 // WhatsApp document/image preview instead of a tappable link, see
-// twilio-client.js. SMS-channel threads ignore it silently (Twilio SMS MMS
+// twilio-client.js. Only valid free-form, inside an open WhatsApp session.
+//
+// contentSid + contentVariables (optional, WhatsApp-channel only) send a
+// Meta-approved Content Template instead — works regardless of session
+// state, so a caller with a template configured should pass these instead
+// of body/mediaUrl. Either way the same human-readable `body` is what gets
+// persisted to ChatMsg, so the dashboard's thread view reads the same
+// regardless of which Twilio API shape actually delivered it.
+//
+// SMS-channel threads ignore mediaUrl/contentSid silently (Twilio SMS MMS
 // support varies by number/region and no caller of this needs it there
-// today) — the message still sends as plain text either way.
-async function sendReply(supabaseClient, { clinicId, threadId, staffId, body, mediaUrl, staffContext }, log, twilioClient) {
+// today, and Content Templates are a WhatsApp-only concept here) — the
+// message still sends as plain text either way.
+async function sendReply(supabaseClient, { clinicId, threadId, staffId, body, mediaUrl, contentSid, contentVariables, staffContext }, log, twilioClient) {
   const thread = await getThread(supabaseClient, clinicId, threadId, staffContext);
 
   let result;
@@ -83,7 +93,9 @@ async function sendReply(supabaseClient, { clinicId, threadId, staffId, body, me
     const sent =
       thread.channel === "sms"
         ? await twilioClient.sendSms({ to: thread.contactPhone, body })
-        : await twilioClient.sendWhatsApp({ to: thread.contactPhone, from: clinic?.whatsappFrom, body, mediaUrl });
+        : contentSid
+          ? await twilioClient.sendWhatsApp({ to: thread.contactPhone, from: clinic?.whatsappFrom, contentSid, contentVariables })
+          : await twilioClient.sendWhatsApp({ to: thread.contactPhone, from: clinic?.whatsappFrom, body, mediaUrl });
     result = { ok: true, stubbed: false, waMessageId: sent?.sid ?? null };
   } else {
     result = await whatsapp.sendWhatsAppMessage({ toPhone: thread.contactPhone, body }, log);
