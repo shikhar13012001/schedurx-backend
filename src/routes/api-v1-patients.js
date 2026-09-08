@@ -31,6 +31,24 @@ function createApiV1PatientsRouter(supabaseClient) {
     }
   });
 
+  // PATCH /api/v1/patients/:id/confirm — clears Patient.source, removing a
+  // "captured" (missed-call auto-created) lead from that filter in the
+  // Patient Directory once staff have reviewed and confirmed it's a real
+  // patient record. The only field this endpoint can change — deliberately
+  // narrow (an allowlist of exactly one action) rather than a general
+  // patient-edit endpoint, which doesn't exist yet.
+  router.patch("/:id/confirm", async (req, res) => {
+    try {
+      const existing = await tableSvc.getPatientById(supabaseClient, req.staff.clinicId, req.params.id);
+      if (!existing) return fail(res, 404, "PATIENT_NOT_FOUND", `Patient '${req.params.id}' not found`);
+      const patient = await tableSvc.updatePatientFields(supabaseClient, req.params.id, { source: null });
+      return ok(res, { patient });
+    } catch (err) {
+      req.log?.error({ err }, "[api-v1:patients] confirm failed");
+      return fail(res, err.statusCode ?? 500, err.code ?? "INTERNAL_ERROR", err.message);
+    }
+  });
+
   return router;
 }
 

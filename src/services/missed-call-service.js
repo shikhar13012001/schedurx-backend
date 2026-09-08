@@ -30,7 +30,10 @@ async function handleDeviceMissedCall(supabaseClient, twilioClient, { clinicId, 
     });
   }
 
-  const patient = await tableSvc.findOrCreatePatient(supabaseClient, clinicId, { phone: normalizedPhone });
+  // source: 'missed_call' only takes effect if this creates a NEW Patient
+  // row — findOrCreatePatient never re-flags an existing one, so a real
+  // patient who happens to also miss a call is never mislabeled "captured".
+  const patient = await tableSvc.findOrCreatePatient(supabaseClient, clinicId, { phone: normalizedPhone, source: "missed_call" });
 
   const callLog = await callLogSvc.createDeviceCallLog(supabaseClient, {
     clinicId,
@@ -71,6 +74,7 @@ async function handleDeviceMissedCall(supabaseClient, twilioClient, { clinicId, 
       normalizedPhone,
       log,
       staff?.doctorId ?? null,
+      callLog.id,
     );
     sent = result.sent;
     if (sent) {

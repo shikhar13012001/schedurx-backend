@@ -4600,6 +4600,129 @@ test("POST /api/v1/public/appointments books a real appointment, creating the Pa
   });
 });
 
+test("POST /api/v1/public/appointments stamps missed-call attribution and auto-confirms a captured patient when a valid missedCallToken is given", async () => {
+  const { createRebookToken } = require("../../src/lib/rebook-token");
+  const phone = "+919123456780";
+  const supabaseClient = createTableStub({
+    Clinic: [publicClinicRow()],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true, schedulerDoctorId: "n-doc-1", schedulerCalendarId: "n-cal-1" }],
+    Patient: [{ id: "pat_captured", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: phone, source: "missed_call" }],
+    CallLog: [{ id: "call_1", clinicId: "clinic-1", phone, outcome: "missed_logged" }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({
+    supabaseClient,
+    nettuClient: makePublicNettuStub(),
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
+
+  const token = createRebookToken({ clinicId: "clinic-1", phone, callLogId: "call_1" });
+
+  await withServer(app, async ({ request }) => {
+    const start = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    const response = await request("/api/v1/public/appointments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        start,
+        patient: { phone: "9123456780" },
+        reason: "Fever",
+        missedCallToken: token,
+      }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 201, JSON.stringify(body));
+    assert.equal(body.data.appointment.sourceCallLogId, "call_1");
+    assert.equal(supabaseClient._tables.Appointment[0].source, "missed_call_recovery");
+
+    // The referenced CallLog's outcome flips to 'booked' — a real,
+    // non-fabricated conversion signal, not just "message sent".
+    const callLog = supabaseClient._tables.CallLog.find((c) => c.id === "call_1");
+    assert.equal(callLog.outcome, "booked");
+
+    // The captured Patient is auto-confirmed by the real booking — no
+    // manual "Confirm" click needed once they've actually booked.
+    assert.equal(body.data.patient.source, null);
+    const patientRow = supabaseClient._tables.Patient.find((p) => p.id === "pat_captured");
+    assert.equal(patientRow.source, null);
+  });
+});
+
+test("POST /api/v1/public/appointments ignores a missedCallToken whose phone/clinic don't match this booking (no cross-attribution)", async () => {
+  const { createRebookToken } = require("../../src/lib/rebook-token");
+  const supabaseClient = createTableStub({
+    Clinic: [publicClinicRow()],
+    Doctor: [{ id: "doc-1", clinicId: "clinic-1", fullName: "Dr. Priya", isActive: true, schedulerDoctorId: "n-doc-1", schedulerCalendarId: "n-cal-1" }],
+    CallLog: [{ id: "call_other", clinicId: "clinic-1", phone: "+919000000000", outcome: "missed_logged" }],
+  });
+  const twilioClient = createTwilioStub();
+  const app = createApp({
+    supabaseClient,
+    nettuClient: makePublicNettuStub(),
+    firebaseAdminApp: null,
+    stripeClient: null,
+    openaiClient: null,
+    twilioClient,
+  });
+
+  // Signed for a DIFFERENT phone number than the one actually booking below.
+  const token = createRebookToken({ clinicId: "clinic-1", phone: "+919000000000", callLogId: "call_other" });
+
+  await withServer(app, async ({ request }) => {
+    const start = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    const response = await request("/api/v1/public/appointments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clinicId: "clinic-1",
+        doctorId: "doc-1",
+        start,
+        patient: { phone: "9123456780" }, // different from the token's claimed phone
+        missedCallToken: token,
+      }),
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 201, JSON.stringify(body));
+    assert.equal(body.data.appointment.sourceCallLogId, undefined);
+    assert.equal(supabaseClient._tables.Appointment[0].source, "patient_web");
+
+    const otherCallLog = supabaseClient._tables.CallLog.find((c) => c.id === "call_other");
+    assert.equal(otherCallLog.outcome, "missed_logged", "unrelated CallLog must not be touched");
+  });
+});
+
+test("PATCH /api/v1/patients/:id/confirm clears a captured patient's source", async () => {
+  const firebaseAdminApp = createFirebaseAdminStub({
+    decodedToken: { uid: "staff-1", email: "owner@example.com", role: "owner", clinicId: "clinic-1" },
+  });
+  const supabaseClient = createTableStub({
+    Staff: [{ id: "staff-1", firebaseUid: "staff-1", clinicId: "clinic-1" }],
+    Patient: [{ id: "pat_captured", clinicId: "clinic-1", fullName: "Test Patient", contactNumber: "+919123456780", source: "missed_call" }],
+  });
+  const app = createApp({ supabaseClient, nettuClient: null, firebaseAdminApp, stripeClient: null, openaiClient: null });
+
+  await withServer(app, async ({ request }) => {
+    const response = await request("/api/v1/patients/pat_captured/confirm", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer anything" },
+    });
+    const body = await readJson(response);
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.data.patient.source, null);
+
+    const missing = await request("/api/v1/patients/does-not-exist/confirm", {
+      method: "PATCH",
+      headers: { Authorization: "Bearer anything" },
+    });
+    assert.equal(missing.status, 404);
+  });
+});
+
 // Phase 7: the minimal contract schedurx-form-agent's thank-you page CTAs
 // consume — a separate repo not available this session, so this is the
 // documented handoff (see docs) rather than an edit made to that repo.

@@ -106,7 +106,15 @@ async function createPatient(supabase, clinicId, phone) {
 // Lookup-or-create for the dashboard booking flow, where a name is typically
 // captured up front (unlike the voice flow's createPatient, which only has a
 // phone number at call-start and fills in the name later via updatePatientFields).
-async function findOrCreatePatient(supabase, clinicId, { phone, fullName, age, gender }) {
+//
+// `source` is only ever applied on the CREATE path — an existing Patient
+// keeps whatever source (or lack of one) it already had, since a captured
+// lead who books directly, or a missed call from someone who was already a
+// real patient, must never retroactively re-flag a genuine patient record
+// as "captured". Only missed-call-service.js passes 'missed_call' today;
+// every other caller (public booking, voice tools, etc.) omits it and
+// behaves exactly as before.
+async function findOrCreatePatient(supabase, clinicId, { phone, fullName, age, gender, source }) {
   const existing = await findPatientByPhone(supabase, clinicId, phone);
   if (existing) {
     if (fullName && !existing.fullName) {
@@ -124,6 +132,7 @@ async function findOrCreatePatient(supabase, clinicId, { phone, fullName, age, g
       contactNumber: phone,
       age: age ?? null,
       gender: gender ?? null,
+      source: source ?? null,
       createdAt: new Date().toISOString(),
     })
     .select()
@@ -150,13 +159,13 @@ async function findPatientsByPhoneAcrossClinics(supabase, phone) {
 async function updatePatientFields(supabase, patientId, patch) {
   let query;
   if (Object.keys(patch).length === 0) {
-    query = supabase.from("Patient").select("id, fullName, age, gender, clinicId, contactNumber").eq("id", patientId);
+    query = supabase.from("Patient").select("id, fullName, age, gender, clinicId, contactNumber, source").eq("id", patientId);
   } else {
     query = supabase
       .from("Patient")
       .update(patch)
       .eq("id", patientId)
-      .select("id, fullName, age, gender, clinicId, contactNumber");
+      .select("id, fullName, age, gender, clinicId, contactNumber, source");
   }
   const { data, error } = await query.maybeSingle();
   if (error) throw dbErr(`updating patient: ${error.message}`);

@@ -50,6 +50,7 @@ const failedMessageSvc = require("./failed-message-service");
 const { renderTemplate } = require("../lib/template");
 const { formatHumanTime } = require("./availability-service");
 const { config } = require("../config");
+const { createRebookToken } = require("../lib/rebook-token");
 
 const IMMEDIATE_TRIGGERS = new Set(["booking_confirmed", "reschedule", "cancellation", "no_show", "post_appointment"]);
 const DELAYED_TRIGGERS = new Set(["reminder", "pre_appointment", "review_request"]);
@@ -306,7 +307,15 @@ async function sendDelayedWorkflowMessage({ supabaseClient, twilioClient, clinic
 // shared/clinic-wide phone or route, which falls back to clinic-level
 // attribution exactly as before — there's no way to guess a doctor that was
 // never recorded anywhere.
-async function sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, callerPhone, log, doctorId = null) {
+//
+// callLogId (also optional) is the CallLog row this specific follow-up is
+// attached to — carried in a signed &mct= token on the booking link so a
+// booking made through it can be traced back to this exact missed call
+// (see api-v1-public.js's POST /appointments), not just "some missed call
+// from this number, at some point". Omitted (no token, no query param) when
+// the caller doesn't have one yet — the link still works, it just can't be
+// attributed.
+async function sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, callerPhone, log, doctorId = null, callLogId = null) {
   if (!callerPhone) return { sent: false };
 
   // Applies across both missed-call paths — see call-log-service.js's
@@ -344,12 +353,17 @@ async function sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, ca
   // doctor on that form when one's known — same query param IntakeForm
   // already reads elsewhere (see app.js's /r/:token redirect).
   const doctorQuery = doctorId ? `?doctor=${encodeURIComponent(doctorId)}` : "";
+  // Additive on top of the existing, already-working link format (never
+  // replaces it) — a patient-facing form that doesn't yet know to read
+  // &mct= just ignores the extra param and books normally, unattributed.
+  const missedCallToken = callLogId ? createRebookToken({ clinicId, phone: callerPhone, callLogId }) : null;
+  const mctQuery = missedCallToken ? `${doctorQuery ? "&" : "?"}mct=${encodeURIComponent(missedCallToken)}` : "";
   const bookingUrl = config.PATIENT_APP_BASE_URL
-    ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${encodeURIComponent(callerPhone)}${doctorQuery}`
+    ? `${config.PATIENT_APP_BASE_URL}/${clinicId}/${encodeURIComponent(callerPhone)}${doctorQuery}${mctQuery}`
     : undefined;
   // Suffix-only form for Content Template URL buttons — see bookingUrlPath in
   // appointment-service.js for why the button variant can't just reuse bookingUrl.
-  const bookingUrlPath = `${clinicId}/${encodeURIComponent(callerPhone)}${doctorQuery}`;
+  const bookingUrlPath = `${clinicId}/${encodeURIComponent(callerPhone)}${doctorQuery}${mctQuery}`;
   try {
     await messagingSvc.sendTemplatedMessage(
       {

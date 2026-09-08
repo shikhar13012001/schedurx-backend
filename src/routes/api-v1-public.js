@@ -23,8 +23,10 @@ const appointmentSvc = require("../services/appointment-service");
 const availabilitySvc = require("../services/availability-service");
 const stripeSvc = require("../services/stripe-service");
 const commsWorkflowSvc = require("../services/comms-workflow-service");
+const callLogSvc = require("../services/call-log-service");
 const { config } = require("../config");
 const { normalizeIndianMobile } = require("../lib/phone");
+const { verifyRebookToken } = require("../lib/rebook-token");
 
 // Ported from schedurx-form-agent's own POST /api/intake, which validated
 // phone numbers the same way before writing to its now-retired Prisma
@@ -103,12 +105,28 @@ function createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient, stri
   router.post("/appointments", async (req, res) => {
     if (!nettuClient) return fail(res, 503, "SCHEDULER_NOT_CONFIGURED", "Calendar scheduling is not configured");
 
-    const { clinicId, doctorId, start, end, patient, reason, notes, bookerRelation, proxyName, successUrl, cancelUrl } = req.body ?? {};
+    const { clinicId, doctorId, start, end, patient, reason, notes, bookerRelation, proxyName, successUrl, cancelUrl, missedCallToken } =
+      req.body ?? {};
     if (!clinicId || !doctorId || !start || !patient?.phone) {
       return fail(res, 422, "MISSING_FIELDS", "clinicId, doctorId, start, and patient.phone are required");
     }
     const phone = normalizePhone(patient.phone);
     if (!phone) return fail(res, 422, "INVALID_PHONE", "patient.phone must be a valid 10-digit Indian mobile number");
+
+    // Missed-call recovery attribution — verified server-side, never trusted
+    // from a bare client-supplied id (a manipulated frontend call could
+    // otherwise falsely attribute any booking to any missed call). The
+    // token's own clinicId/phone claims must match this exact request's —
+    // a token signed for one caller's missed call must not attribute a
+    // booking made under a different phone number, even if someone tried
+    // reusing/forging the query param.
+    let sourceCallLogId = null;
+    if (missedCallToken) {
+      const claims = verifyRebookToken(missedCallToken);
+      if (claims?.callLogId && claims.clinicId === clinicId && claims.phone === phone) {
+        sourceCallLogId = claims.callLogId;
+      }
+    }
 
     try {
       const patientRow = await tableSvc.findOrCreatePatient(supabaseClient, clinicId, {
@@ -189,11 +207,42 @@ function createApiV1PublicRouter(supabaseClient, nettuClient, twilioClient, stri
           notes,
           bookerRelation,
           proxyName,
-          source: "patient_web",
+          source: sourceCallLogId ? "missed_call_recovery" : "patient_web",
         },
         req.log,
         twilioClient,
       );
+
+      // Additive follow-up update rather than threading sourceCallLogId
+      // through appointment-service.js's booking internals — keeps this
+      // attribution concern isolated to the one route that needs it. Never
+      // fails the booking itself if this secondary write has a problem;
+      // the appointment is already real at this point.
+      if (sourceCallLogId) {
+        const { error: attributionErr } = await supabaseClient
+          .from("Appointment")
+          .update({ sourceCallLogId })
+          .eq("id", appointment.id);
+        if (attributionErr) {
+          req.log?.error({ err: attributionErr, appointmentId: appointment.id }, "[api-v1:public] failed to stamp missed-call attribution");
+        } else {
+          appointment.sourceCallLogId = sourceCallLogId;
+        }
+        await callLogSvc
+          .updateCallLogOutcome(supabaseClient, sourceCallLogId, "booked", "Booked an appointment via the missed-call recovery link.")
+          .catch((err) => req.log?.error({ err, sourceCallLogId }, "[api-v1:public] failed to update CallLog outcome to booked"));
+      }
+
+      // A real booking is itself the confirmation signal for a captured
+      // lead — not just via the missed-call recovery link specifically, any
+      // successful booking proves genuine intent, so this clears
+      // Patient.source regardless of how the booking route was reached.
+      if (patientRow.source === "missed_call") {
+        await tableSvc
+          .updatePatientFields(supabaseClient, patientRow.id, { source: null })
+          .catch((err) => req.log?.error({ err, patientId: patientRow.id }, "[api-v1:public] failed to auto-confirm captured patient"));
+        patientRow.source = null;
+      }
 
       return res.status(201).json({ success: true, data: { appointment, patient: patientRow }, message: null });
     } catch (err) {

@@ -35,12 +35,18 @@ function base64url(buf) {
 // present it lets the landing page skip straight to picking a new time
 // with the same doctor instead of showing a full doctor picker (used by
 // the doctor-blocked-time rebook notice, where we already know exactly
-// who the patient was trying to see).
-function createRebookToken({ clinicId, phone, doctorId }) {
+// who the patient was trying to see). callLogId is the same idea for the
+// missed-call recovery flow (comms-workflow-service.js's
+// sendMissedCallFollowup) — when the resulting booking comes back through
+// api-v1-public.js with this token, it's what lets that specific CallLog
+// row (not just "some missed call from this number, sometime") flip to
+// outcome 'booked' and the new Appointment record which call recovered it.
+function createRebookToken({ clinicId, phone, doctorId, callLogId }) {
   if (!clinicId || !phone) return null;
   const expiresAt = Date.now() + TOKEN_TTL_MS;
   const claims = { clinicId, phone, expiresAt };
   if (doctorId) claims.doctorId = doctorId;
+  if (callLogId) claims.callLogId = callLogId;
   const payload = base64url(JSON.stringify(claims));
   const signature = base64url(crypto.createHmac("sha256", signingKey()).update(payload).digest());
   return `${payload}.${signature}`;
@@ -73,7 +79,7 @@ function verifyRebookToken(token) {
   }
   if (!claims?.clinicId || !claims?.phone || typeof claims.expiresAt !== "number") return null;
   if (Date.now() > claims.expiresAt) return null;
-  return { clinicId: claims.clinicId, phone: claims.phone, doctorId: claims.doctorId };
+  return { clinicId: claims.clinicId, phone: claims.phone, doctorId: claims.doctorId, callLogId: claims.callLogId };
 }
 
 // Convenience for the two call sites that just want a ready-to-send URL

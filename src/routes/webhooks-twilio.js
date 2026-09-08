@@ -405,7 +405,15 @@ function createTwilioWebhookRouter({ supabaseClient, twilioClient, nettuClient, 
       // up" status should trigger a follow-up — not every intermediate
       // ringing/in-progress callback Twilio sends for the same call.
       if (callStatus === "completed") {
-        await commsWorkflowSvc.sendMissedCallFollowup(supabaseClient, twilioClient, clinicId, req.body?.From, req.log, route?.doctorId ?? null);
+        await commsWorkflowSvc.sendMissedCallFollowup(
+          supabaseClient,
+          twilioClient,
+          clinicId,
+          req.body?.From,
+          req.log,
+          route?.doctorId ?? null,
+          callLog?.id ?? null,
+        );
       }
 
       res.sendStatus(200);
